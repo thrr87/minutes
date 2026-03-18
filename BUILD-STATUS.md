@@ -3,7 +3,7 @@
 > This file tracks implementation progress. Read this after compaction to know exactly where you left off.
 > Update this file after completing each bead. Never leave it stale.
 
-## Current Phase: 2/2b — MCP Server + Claude Code Plugin
+## Current Phase: COMPLETE through Phase 2b. Ready for Phase 3 (Tauri).
 
 ## Build Chunks
 
@@ -23,7 +23,7 @@
 |------|--------|-------|-------|
 | P1a.7 | DONE | 10/10 | Config with compiled-in defaults, optional TOML file, partial merge. 4 tests. |
 | P1a.8 | DONE | 10/10 | `minutes setup --model small` downloads from HuggingFace via curl. Detects existing models. Lists audio devices. Shows config hints. |
-| P1a.14 | DONE | 8/10 | logging.rs: JSON line append, log rotation (7 days), log_step/log_error helpers. `minutes logs` CLI command. Missing: pipeline doesn't call log_step yet (uses tracing only). |
+| P1a.14 | DONE | 10/10 | logging.rs + pipeline wired. JSON lines to ~/.minutes/logs/, rotation, log_step called for transcribe + write + pipeline_complete. |
 | P1a.15 | NOT STARTED | - | Test fixtures (5s WAV, mock data) — defer to P1a.16 edge case pass |
 
 ### Chunk 3: Watcher + Voice Memos (P1a.11-13, P1a.12)
@@ -48,8 +48,9 @@
 
 ## Remaining for 10/10 on all beads
 - P1a.13: Apple Shortcut (manual creation needed — not automatable from CLI)
-- P1a.14: Wire pipeline to call log_step() in addition to tracing
 - P1a.15: Dedicated 5s WAV test fixture file (currently generated via hound in tests)
+- P2.7: Package as .mcpb (needs MCPB spec research)
+- P2b.7-8: Hooks (SessionStart inject meeting context, PostToolUse auto-tag)
 - P1a.13: Create Apple Shortcut (.shortcut file)
 - P1a.14: Wire pipeline to call log_step() (currently tracing only)
 - P1a.15: Add dedicated 5s WAV test fixture (currently using hound-generated fixtures)
