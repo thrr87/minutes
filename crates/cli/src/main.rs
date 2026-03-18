@@ -91,6 +91,9 @@ enum Commands {
         list: bool,
     },
 
+    /// List available audio input devices
+    Devices,
+
     /// Show recent logs
     Logs {
         /// Show only errors
@@ -135,6 +138,7 @@ fn main() -> Result<()> {
             title,
         } => cmd_process(&path, &content_type, title.as_deref(), &config),
         Commands::Watch { dir } => cmd_watch(dir.as_deref(), &config),
+        Commands::Devices => cmd_devices(),
         Commands::Setup { model, list } => cmd_setup(&model, list),
         Commands::Logs { errors, lines } => cmd_logs(errors, lines),
     }
@@ -392,6 +396,19 @@ fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
     // The LockGuard in watch.rs will release the lock on drop
     drop(watcher_thread);
 
+    Ok(())
+}
+
+fn cmd_devices() -> Result<()> {
+    let devices = minutes_core::capture::list_input_devices();
+    if devices.is_empty() {
+        eprintln!("No audio input devices found.");
+    } else {
+        eprintln!("Audio input devices:");
+        for d in &devices {
+            eprintln!("  {}", d);
+        }
+    }
     Ok(())
 }
 
