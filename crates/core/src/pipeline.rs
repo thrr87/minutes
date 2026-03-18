@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::error::MinutesError;
 use crate::markdown::{self, ContentType, Frontmatter, OutputStatus, WriteResult};
+use crate::summarize;
 use crate::transcribe;
 use chrono::Local;
 use std::path::Path;
@@ -58,8 +59,10 @@ pub fn process(
             "below minimum word threshold — marking as no-speech"
         );
         Some(OutputStatus::NoSpeech)
+    } else if config.summarization.engine != "none" {
+        Some(OutputStatus::Complete)
     } else {
-        Some(OutputStatus::TranscriptOnly) // Phase 1a: no summarization
+        Some(OutputStatus::TranscriptOnly)
     };
 
     // Step 2: Diarize (Phase 1b, optional — currently skipped)
@@ -68,12 +71,13 @@ pub fn process(
     //     let speakers = diarize::run(audio_path, config)?;
     // }
 
-    // Step 3: Summarize (Phase 1b, optional — currently skipped)
-    let summary: Option<String> = None;
-    // if config.summarization.engine != "none" {
-    //     tracing::info!(step = "summarize", "generating summary");
-    //     summary = Some(summarize::run(&transcript, config)?);
-    // }
+    // Step 3: Summarize (optional — depends on config.summarization.engine)
+    let summary: Option<String> = if config.summarization.engine != "none" {
+        tracing::info!(step = "summarize", "generating summary");
+        summarize::summarize(&transcript, config).map(|s| summarize::format_summary(&s))
+    } else {
+        None
+    };
 
     // Step 4: Write markdown (always)
     let duration = estimate_duration(audio_path);

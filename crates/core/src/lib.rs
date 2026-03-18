@@ -6,6 +6,7 @@ pub mod markdown;
 pub mod pid;
 pub mod pipeline;
 pub mod search;
+pub mod summarize;
 pub mod transcribe;
 pub mod watch;
 
