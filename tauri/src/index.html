@@ -562,7 +562,7 @@
       if (!meetings || meetings.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'empty-state';
-        empty.innerHTML = '<div class="icon">🎙</div><div class="title">No meetings yet</div><div class="sub">Start a recording or drop audio files into ~/meetings/memos/</div>';
+        empty.innerHTML = '<div class="icon">🎙</div><div class="title">No meetings yet</div><div class="sub">Start a recording or watch ~/.minutes/inbox/ for new audio files</div>';
         meetingsScroll.appendChild(empty);
         return;
       }

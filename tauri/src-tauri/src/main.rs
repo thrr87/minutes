@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -57,7 +57,8 @@ pub fn update_tray_state(app: &tauri::AppHandle, is_recording: bool) {
             "Minutes — Recording..."
         } else {
             "Minutes"
-        })).ok();
+        }))
+        .ok();
     }
 }
 
@@ -74,33 +75,49 @@ fn main() {
             stop_flag: stop_flag.clone(),
         })
         .setup(move |app| {
+            let initial_recording = minutes_core::pid::status().recording;
+
             // Create main window on launch
             show_main_window(app.handle());
 
             // Tray menu
-            let open_item =
-                MenuItem::with_id(app, "open", "Open Minutes", true, None::<&str>)?;
+            let open_item = MenuItem::with_id(app, "open", "Open Minutes", true, None::<&str>)?;
             let sep0 = MenuItem::with_id(app, "sep0", "──────────", false, None::<&str>)?;
-            let record_item =
-                MenuItem::with_id(app, "record", "Start Recording", true, None::<&str>)?;
+            let record_item = MenuItem::with_id(
+                app,
+                "record",
+                "Start Recording",
+                !initial_recording,
+                None::<&str>,
+            )?;
             let record_item_ref = record_item.clone();
-            let stop_item =
-                MenuItem::with_id(app, "stop", "Stop Recording", false, None::<&str>)?;
+            let stop_item = MenuItem::with_id(
+                app,
+                "stop",
+                "Stop Recording",
+                initial_recording,
+                None::<&str>,
+            )?;
             let stop_item_ref = stop_item.clone();
             let sep = MenuItem::with_id(app, "sep1", "──────────", false, None::<&str>)?;
-            let note_item =
-                MenuItem::with_id(app, "note", "Add Note...", true, None::<&str>)?;
+            let note_item = MenuItem::with_id(app, "note", "Add Note...", true, None::<&str>)?;
             let list_item =
                 MenuItem::with_id(app, "list", "Open Meetings Folder", true, None::<&str>)?;
             let sep2 = MenuItem::with_id(app, "sep2", "──────────", false, None::<&str>)?;
-            let quit_item =
-                MenuItem::with_id(app, "quit", "Quit Minutes", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit Minutes", true, None::<&str>)?;
 
             let menu = Menu::with_items(
                 app,
                 &[
-                    &open_item, &sep0, &record_item, &stop_item, &sep,
-                    &note_item, &list_item, &sep2, &quit_item,
+                    &open_item,
+                    &sep0,
+                    &record_item,
+                    &stop_item,
+                    &sep,
+                    &note_item,
+                    &list_item,
+                    &sep2,
+                    &quit_item,
                 ],
             )?;
 
@@ -122,7 +139,7 @@ fn main() {
                             show_main_window(app);
                         }
                         "record" => {
-                            if recording.load(Ordering::Relaxed) {
+                            if commands::recording_active(&recording) {
                                 return;
                             }
                             rec_item.set_text("Recording...").ok();
@@ -144,7 +161,24 @@ fn main() {
                             });
                         }
                         "stop" => {
-                            stop.store(true, Ordering::Relaxed);
+                            if commands::request_stop(&recording, &stop).is_ok() {
+                                rec_item.set_text("Stopping...").ok();
+                                rec_item.set_enabled(false).ok();
+                                stp_item.set_enabled(false).ok();
+                                let app_done = app.clone();
+                                let ri = rec_item.clone();
+                                let si = stp_item.clone();
+                                std::thread::spawn(move || {
+                                    if commands::wait_for_recording_shutdown(
+                                        std::time::Duration::from_secs(120),
+                                    ) {
+                                        ri.set_text("Start Recording").ok();
+                                        ri.set_enabled(true).ok();
+                                        si.set_enabled(false).ok();
+                                        update_tray_state(&app_done, false);
+                                    }
+                                });
+                            }
                         }
                         "note" => {
                             show_note_window(app);
@@ -155,9 +189,16 @@ fn main() {
                             let _ = std::process::Command::new("open").arg(meetings_dir).spawn();
                         }
                         "quit" => {
-                            if recording.load(Ordering::Relaxed) {
-                                stop.store(true, Ordering::Relaxed);
-                                std::thread::sleep(std::time::Duration::from_secs(2));
+                            if commands::recording_active(&recording) {
+                                if commands::request_stop(&recording, &stop).is_err() {
+                                    return;
+                                }
+                                if !commands::wait_for_recording_shutdown(
+                                    std::time::Duration::from_secs(120),
+                                ) {
+                                    eprintln!("Timed out waiting for recording shutdown.");
+                                    return;
+                                }
                             }
                             std::process::exit(0);
                         }
@@ -165,6 +206,8 @@ fn main() {
                     }
                 })
                 .build(app)?;
+
+            update_tray_state(app.handle(), initial_recording);
 
             Ok(())
         })

@@ -141,6 +141,38 @@ pub fn cleanup() {
     let _ = fs::remove_file(recording_start_path());
 }
 
+/// Validate that a meeting annotation target is a markdown file inside the
+/// configured meetings output directory.
+pub fn validate_meeting_path(meeting_path: &Path, meetings_root: &Path) -> Result<(), String> {
+    if meeting_path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return Err("meeting path must point to a .md file".into());
+    }
+
+    let canonical_meeting = meeting_path.canonicalize().map_err(|e| {
+        format!(
+            "could not resolve meeting path {}: {}",
+            meeting_path.display(),
+            e
+        )
+    })?;
+    let canonical_root = meetings_root.canonicalize().map_err(|e| {
+        format!(
+            "could not resolve meetings directory {}: {}",
+            meetings_root.display(),
+            e
+        )
+    })?;
+
+    if !canonical_meeting.starts_with(&canonical_root) {
+        return Err(format!(
+            "meeting path must be inside {}",
+            canonical_root.display()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Add a note to an existing meeting file (post-meeting annotation).
 pub fn annotate_meeting(meeting_path: &Path, text: &str) -> Result<(), String> {
     if !meeting_path.exists() {
@@ -259,6 +291,55 @@ mod tests {
     #[test]
     fn annotate_meeting_rejects_nonexistent_file() {
         let result = annotate_meeting(Path::new("/nonexistent/meeting.md"), "note");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_meeting_path_allows_files_inside_output_dir() {
+        let dir = TempDir::new().unwrap();
+        let meetings_dir = dir.path().join("meetings");
+        fs::create_dir_all(&meetings_dir).unwrap();
+
+        let meeting = meetings_dir.join("demo.md");
+        fs::write(&meeting, "# demo").unwrap();
+
+        let result = validate_meeting_path(&meeting, &meetings_dir);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_meeting_path_rejects_files_outside_output_dir() {
+        let dir = TempDir::new().unwrap();
+        let meetings_dir = dir.path().join("meetings");
+        let outside_dir = dir.path().join("outside");
+        fs::create_dir_all(&meetings_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        let meeting = outside_dir.join("demo.md");
+        fs::write(&meeting, "# demo").unwrap();
+
+        let result = validate_meeting_path(&meeting, &meetings_dir);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_meeting_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let meetings_dir = dir.path().join("meetings");
+        let outside_dir = dir.path().join("outside");
+        fs::create_dir_all(&meetings_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        let target = outside_dir.join("secret.md");
+        fs::write(&target, "# secret").unwrap();
+
+        let link = meetings_dir.join("linked.md");
+        symlink(&target, &link).unwrap();
+
+        let result = validate_meeting_path(&link, &meetings_dir);
         assert!(result.is_err());
     }
 }

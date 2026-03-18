@@ -539,15 +539,14 @@ fn cmd_service(action: &str) -> Result<()> {
 
     match action {
         "install" => {
-            let minutes_bin = std::env::current_exe()
-                .unwrap_or_else(|_| PathBuf::from("minutes"));
+            let minutes_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("minutes"));
             let home = dirs::home_dir().unwrap_or_default();
             let log_dir = Config::minutes_dir().join("logs");
             std::fs::create_dir_all(&log_dir)?;
             std::fs::create_dir_all(home.join("Library/LaunchAgents"))?;
 
             let plist = format!(
-r#"<?xml version="1.0" encoding="UTF-8"?>
+                r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -638,7 +637,10 @@ r#"<?xml version="1.0" encoding="UTF-8"?>
                 }
             }
         }
-        _ => anyhow::bail!("Unknown action: {}. Use install, uninstall, or status.", action),
+        _ => anyhow::bail!(
+            "Unknown action: {}. Use install, uninstall, or status.",
+            action
+        ),
     }
     Ok(())
 }

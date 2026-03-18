@@ -21,9 +21,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { readFile } from "fs/promises";
-import { join } from "path";
+import { extname, isAbsolute, join, relative, resolve } from "path";
 import { homedir } from "os";
 
 const execFileAsync = promisify(execFile);
@@ -79,6 +79,55 @@ function parseJsonOutput(stdout: string): any {
   } catch {
     return { raw: stdout };
   }
+}
+
+function canonicalizePath(path: string): string {
+  return existsSync(path) ? realpathSync(path) : resolve(path);
+}
+
+function isWithinDirectory(candidate: string, root: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function validatePathInDirectory(path: string, root: string, allowedExts: string[]): string {
+  const canonicalPath = canonicalizePath(path);
+  const canonicalRoot = canonicalizePath(root);
+
+  if (!allowedExts.includes(extname(canonicalPath).toLowerCase())) {
+    throw new Error(
+      `Access denied: path must be within ${canonicalRoot} and end with ${allowedExts.join(", ")}`
+    );
+  }
+
+  if (!isWithinDirectory(canonicalPath, canonicalRoot)) {
+    throw new Error(`Access denied: path must be within ${canonicalRoot}`);
+  }
+
+  return canonicalPath;
+}
+
+function validatePathInDirectories(
+  path: string,
+  roots: string[],
+  allowedExts: string[]
+): string {
+  const canonicalPath = canonicalizePath(path);
+
+  if (!allowedExts.includes(extname(canonicalPath).toLowerCase())) {
+    throw new Error(
+      `Access denied: path must end with one of ${allowedExts.join(", ")}`
+    );
+  }
+
+  const canonicalRoots = roots.map((root) => canonicalizePath(root));
+  if (!canonicalRoots.some((root) => isWithinDirectory(canonicalPath, root))) {
+    throw new Error(
+      `Access denied: file must be inside one of ${canonicalRoots.join(", ")}`
+    );
+  }
+
+  return canonicalPath;
 }
 
 // ── MCP Server ──────────────────────────────────────────────
@@ -259,15 +308,7 @@ server.tool(
   },
   async ({ path: filePath }) => {
     try {
-      // Security: validate path is within ~/meetings/ and is a .md file
-      const { resolve } = await import("path");
-      const resolved = resolve(filePath);
-      const meetingsDir = resolve(join(homedir(), "meetings"));
-      if (!resolved.startsWith(meetingsDir) || !resolved.endsWith(".md")) {
-        return {
-          content: [{ type: "text" as const, text: "Access denied: path must be within ~/meetings/ and end with .md" }],
-        };
-      }
+      const resolved = validatePathInDirectory(filePath, join(homedir(), "meetings"), [".md"]);
       const content = await readFile(resolved, "utf-8");
       return { content: [{ type: "text" as const, text: content }] };
     } catch (error: any) {
@@ -289,26 +330,17 @@ server.tool(
     title: z.string().optional().describe("Optional title"),
   },
   async ({ file_path, type: contentType, title }) => {
-    // Security: validate file path is in allowed directories
-    const { resolve } = await import("path");
-    const resolved = resolve(file_path);
     const allowedDirs = [
-      resolve(join(homedir(), ".minutes", "inbox")),
-      resolve(join(homedir(), "meetings")),
-      resolve(join(homedir(), "Downloads")),
+      join(homedir(), ".minutes", "inbox"),
+      join(homedir(), "meetings"),
+      join(homedir(), "Downloads"),
     ];
     const audioExts = [".wav", ".m4a", ".mp3", ".ogg", ".webm"];
-    const ext = resolved.slice(resolved.lastIndexOf(".")).toLowerCase();
-    if (!allowedDirs.some((d) => resolved.startsWith(d)) || !audioExts.includes(ext)) {
-      return {
-        content: [{ type: "text" as const, text: "Access denied: file must be in ~/meetings/, ~/.minutes/inbox/, or ~/Downloads/ with a valid audio extension" }],
-      };
-    }
-
-    const args = ["process", resolved, "-t", contentType];
-    if (title) args.push("--title", title);
 
     try {
+      const resolved = validatePathInDirectories(file_path, allowedDirs, audioExts);
+      const args = ["process", resolved, "-t", contentType];
+      if (title) args.push("--title", title);
       const { stdout } = await runMinutes(args, 300000);
       const result = parseJsonOutput(stdout);
 
@@ -345,7 +377,14 @@ server.tool(
   async ({ text, meeting_path }) => {
     try {
       const args = ["note", text];
-      if (meeting_path) args.push("--meeting", meeting_path);
+      if (meeting_path) {
+        const resolved = validatePathInDirectory(
+          meeting_path,
+          join(homedir(), "meetings"),
+          [".md"]
+        );
+        args.push("--meeting", resolved);
+      }
 
       const { stdout, stderr } = await runMinutes(args);
       return {
