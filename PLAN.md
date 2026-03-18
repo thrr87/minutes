@@ -2,7 +2,7 @@
 
 > **Name**: `minutes`
 > **Tagline**: Every meeting, every idea, every voice note — searchable by your AI
-> **Domain**: getminutes.dev (to register)
+> **Domain**: TBD — check useminutes.dev, minutescli.dev, minutes.sh at Cloudflare
 > **Registries**: crates.io (available), PyPI (available), npm (@minutes/cli or scoped)
 > **Created**: 2026-03-17
 > **Author**: Mat Silverstein
