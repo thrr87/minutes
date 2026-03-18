@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Add Note</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+      background: #1c1c1e;
+      color: #f5f5f7;
+      padding: 20px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: #86868b;
+      margin-bottom: 8px;
+    }
+
+    .input-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    textarea {
+      flex: 1;
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #38383a;
+      border-radius: 8px;
+      background: #2c2c2e;
+      color: #f5f5f7;
+      font-family: inherit;
+      font-size: 14px;
+      line-height: 1.4;
+      resize: none;
+      outline: none;
+      transition: border-color 0.15s ease;
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
+    textarea:focus {
+      border-color: #0a84ff;
+      box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.15);
+    }
+
+    textarea::placeholder {
+      color: #636366;
+    }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 12px;
+    }
+
+    .hint {
+      font-size: 11px;
+      color: #636366;
+    }
+
+    .hint kbd {
+      display: inline-block;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: #38383a;
+      color: #86868b;
+      font-family: inherit;
+      font-size: 10px;
+      border: 1px solid #48484a;
+    }
+
+    .btn {
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: none;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.12s ease;
+    }
+
+    .btn-primary {
+      background: #0a84ff;
+      color: #fff;
+    }
+
+    .btn-primary:hover { background: #409cff; }
+    .btn-primary:active { background: #0071e3; transform: scale(0.97); }
+
+    .btn-primary:disabled {
+      background: #38383a;
+      color: #636366;
+      cursor: default;
+      transform: none;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%) translateY(40px);
+      background: #30d158;
+      color: #000;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 20px;
+      opacity: 0;
+      transition: all 0.25s ease;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <div class="label">Note</div>
+  <div class="input-wrap">
+    <textarea
+      id="note-input"
+      placeholder="What's happening right now..."
+      autofocus
+    ></textarea>
+  </div>
+  <div class="footer">
+    <span class="hint"><kbd>&#8984;Return</kbd> to save</span>
+    <button class="btn btn-primary" id="save-btn" disabled>Save Note</button>
+  </div>
+  <div class="toast" id="toast">Note saved</div>
+
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
+
+    const input = document.getElementById('note-input');
+    const btn = document.getElementById('save-btn');
+    const toast = document.getElementById('toast');
+
+    input.addEventListener('input', () => {
+      btn.disabled = !input.value.trim();
+    });
+
+    async function saveNote() {
+      const text = input.value.trim();
+      if (!text) return;
+
+      btn.disabled = true;
+      try {
+        await invoke('cmd_add_note', { text });
+        input.value = '';
+
+        // Flash success
+        toast.classList.add('show');
+        setTimeout(() => {
+          toast.classList.remove('show');
+          setTimeout(() => {
+            getCurrentWebviewWindow().close();
+          }, 200);
+        }, 600);
+      } catch (e) {
+        // Not recording — show inline
+        toast.textContent = e;
+        toast.style.background = '#ff453a';
+        toast.style.color = '#fff';
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 2000);
+        btn.disabled = false;
+      }
+    }
+
+    btn.addEventListener('click', saveNote);
+
+    // Cmd+Enter to save, Escape to close
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        saveNote();
+      }
+      if (e.key === 'Escape') {
+        getCurrentWebviewWindow().close();
+      }
+    });
+
+    // Focus the textarea on window show
+    input.focus();
+  </script>
+</body>
+</html>

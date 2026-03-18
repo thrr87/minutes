@@ -4,19 +4,19 @@
   "identifier": "dev.getminutes.app",
   "version": "0.1.0",
   "build": {
-    "frontendDist": "../src",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "../src"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "tooltip": "Minutes — conversation memory"
-    },
     "security": {
       "csp": null
+    }
+  },
+  "bundle": {
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
     }
   },
   "plugins": {

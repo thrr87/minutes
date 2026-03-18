@@ -1,8 +1,17 @@
 use crate::config::Config;
 use crate::error::CaptureError;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+
+/// Shared audio level (0–100 scale) for UI visualization.
+/// Updated ~10x per second from the cpal callback.
+static AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
+
+/// Get the current audio input level (0–100).
+pub fn audio_level() -> u32 {
+    AUDIO_LEVEL.load(Ordering::Relaxed)
+}
 
 // ──────────────────────────────────────────────────────────────
 // Audio capture using cpal (cross-platform audio I/O).
@@ -35,6 +44,7 @@ pub fn record_to_wav(
         .ok_or(CaptureError::DeviceNotFound)?;
 
     let device_name = device.name().unwrap_or_else(|_| "unknown".into());
+    eprintln!("[minutes] Using input device: {}", device_name);
     tracing::info!(device = %device_name, "using audio input device");
 
     // Get the default input config
@@ -79,11 +89,17 @@ pub fn record_to_wav(
     let err_flag = Arc::new(AtomicBool::new(false));
     let err_flag_clone = Arc::clone(&err_flag);
 
+    // Reset audio level
+    AUDIO_LEVEL.store(0, Ordering::Relaxed);
+
     let stream = match supported_config.sample_format() {
         cpal::SampleFormat::F32 => {
             let ch = channels as usize;
             let mut resample_pos: f64 = 0.0;
             let mut input_samples: Vec<f32> = Vec::new();
+            let mut level_accum: f64 = 0.0;
+            let mut level_count: u32 = 0;
+            let level_interval = (sample_rate / 10) as u32; // ~10 updates/sec
 
             device
                 .build_input_stream(
@@ -93,10 +109,22 @@ pub fn record_to_wav(
                             return;
                         }
 
-                        // Mix to mono
+                        // Mix to mono, apply gain, compute RMS for level meter
+                        const GAIN: f32 = 8.0; // Boost quiet mic input
                         for chunk in data.chunks(ch) {
-                            let mono: f32 = chunk.iter().sum::<f32>() / ch as f32;
+                            let mono: f32 = (chunk.iter().sum::<f32>() / ch as f32) * GAIN;
+                            let mono = mono.clamp(-1.0, 1.0);
                             input_samples.push(mono);
+                            level_accum += (mono as f64) * (mono as f64);
+                            level_count += 1;
+                            if level_count >= level_interval {
+                                let rms = (level_accum / level_count as f64).sqrt();
+                                // Scale to 0-100 (voice typically peaks ~0.1–0.5)
+                                let level = (rms * 300.0).min(100.0) as u32;
+                                AUDIO_LEVEL.store(level, Ordering::Relaxed);
+                                level_accum = 0.0;
+                                level_count = 0;
+                            }
                         }
 
                         // Downsample to 16kHz using simple decimation with averaging
@@ -137,6 +165,9 @@ pub fn record_to_wav(
             let ch = channels as usize;
             let mut resample_pos: f64 = 0.0;
             let mut input_samples: Vec<f32> = Vec::new();
+            let mut level_accum: f64 = 0.0;
+            let mut level_count: u32 = 0;
+            let level_interval = (sample_rate / 10) as u32;
 
             device
                 .build_input_stream(
@@ -146,10 +177,21 @@ pub fn record_to_wav(
                             return;
                         }
 
+                        const GAIN: f32 = 8.0;
                         for chunk in data.chunks(ch) {
                             let mono: f32 =
-                                chunk.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / ch as f32;
+                                (chunk.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / ch as f32) * GAIN;
+                            let mono = mono.clamp(-1.0, 1.0);
                             input_samples.push(mono);
+                            level_accum += (mono as f64) * (mono as f64);
+                            level_count += 1;
+                            if level_count >= level_interval {
+                                let rms = (level_accum / level_count as f64).sqrt();
+                                let level = (rms * 300.0).min(100.0) as u32;
+                                AUDIO_LEVEL.store(level, Ordering::Relaxed);
+                                level_accum = 0.0;
+                                level_count = 0;
+                            }
                         }
 
                         let mut guard = writer_clone.lock().unwrap();
@@ -226,6 +268,9 @@ pub fn record_to_wav(
         w.finalize()
             .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV finalize: {}", e))))?;
     }
+
+    eprintln!("[minutes] Captured {} samples ({:.1}s), peak audio level during recording: {}",
+        total_samples, duration_secs, AUDIO_LEVEL.load(Ordering::Relaxed));
 
     if total_samples == 0 {
         return Err(CaptureError::EmptyRecording);

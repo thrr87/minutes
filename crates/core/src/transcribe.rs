@@ -166,12 +166,14 @@ fn load_wav(path: &Path) -> Result<Vec<f32>, TranscribeError> {
     let sample_rate = spec.sample_rate;
     let channels = spec.channels as usize;
 
-    // Read all samples as f32
+    // Read all samples as f32, normalizing by actual bit depth
+    let bits = spec.bits_per_sample;
+    let max_val = (1_i64 << (bits - 1)) as f32; // e.g. 16-bit → 32768.0
     let raw_samples: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Int => reader
             .into_samples::<i32>()
             .filter_map(|s| s.ok())
-            .map(|s| s as f32 / i32::MAX as f32)
+            .map(|s| s as f32 / max_val)
             .collect(),
         hound::SampleFormat::Float => reader
             .into_samples::<f32>()

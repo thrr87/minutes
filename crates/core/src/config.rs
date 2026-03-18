@@ -96,7 +96,7 @@ impl Default for TranscriptionConfig {
         Self {
             model: "small".into(),
             model_path: minutes_dir().join("models"),
-            min_words: 10,
+            min_words: 3,
         }
     }
 }
@@ -242,7 +242,7 @@ mod tests {
     fn default_config_is_valid() {
         let config = Config::default();
         assert_eq!(config.transcription.model, "small");
-        assert_eq!(config.transcription.min_words, 10);
+        assert_eq!(config.transcription.min_words, 3);
         assert_eq!(config.diarization.engine, "none");
         assert_eq!(config.summarization.engine, "none");
         assert_eq!(config.search.engine, "builtin");
@@ -272,7 +272,7 @@ model = "large-v3"
         let config = Config::load_from(&config_path);
         assert_eq!(config.transcription.model, "large-v3");
         // Other fields should be defaults
-        assert_eq!(config.transcription.min_words, 10);
+        assert_eq!(config.transcription.min_words, 3);
         assert_eq!(config.diarization.engine, "none");
     }
 
