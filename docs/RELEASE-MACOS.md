@@ -13,6 +13,8 @@ The `Release macOS` workflow:
 
 - runs on `workflow_dispatch`
 - also runs automatically for Git tags that start with `v`
+- installs a pinned `tauri-cli` version from the workflow env so release builds
+  stay reproducible across reruns
 - builds the Tauri desktop bundle with macOS signing + notarization
 - uploads the signed `Minutes.app`
 - uploads the signed `.dmg`
@@ -104,6 +106,8 @@ first and then run the same commands.
 - The workflow is intentionally explicit rather than magical. If signing or
   notarization fails, the logs should point directly at the failing secret or
   Apple step.
+- The workflow pins `TAURI_CLI_VERSION` in YAML. Bump that version
+  intentionally when we decide to move the release toolchain forward.
 - The workflow currently builds the runner-native macOS bundle. If universal
   binaries become a requirement later, track that separately instead of
   complicating this first trusted pipeline.

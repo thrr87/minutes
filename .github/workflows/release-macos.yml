@@ -13,6 +13,7 @@ env:
   CARGO_TERM_COLOR: always
   MACOSX_DEPLOYMENT_TARGET: "11.0"
   CXXFLAGS: -I$(xcrun --show-sdk-path)/usr/include/c++/v1
+  TAURI_CLI_VERSION: "2.10.1"
 
 jobs:
   macos-release:
@@ -39,7 +40,7 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version '^2' --locked
+        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
 
       - name: Validate signing and notarization secrets
         env:
