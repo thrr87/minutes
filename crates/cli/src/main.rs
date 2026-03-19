@@ -259,7 +259,16 @@ fn cmd_record(title: Option<String>, context: Option<String>, config: &Config) -
             };
             let _ = minutes_core::pid::set_processing_status(Some(label));
         },
-    )?;
+    );
+
+    if let Err(err) = result {
+        minutes_core::pid::remove().ok();
+        minutes_core::pid::clear_processing_status().ok();
+        minutes_core::notes::cleanup();
+        return Err(err.into());
+    }
+
+    let result = result?;
 
     // Write result file for `minutes stop` to read
     let result_json = serde_json::to_string_pretty(&serde_json::json!({

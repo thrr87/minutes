@@ -43,6 +43,7 @@ pub fn processing_status_path() -> PathBuf {
 pub struct ProcessingStatus {
     pub processing: bool,
     pub stage: Option<String>,
+    pub owner_pid: u32,
 }
 
 pub fn set_processing_status(stage: Option<&str>) -> std::io::Result<()> {
@@ -54,6 +55,7 @@ pub fn set_processing_status(stage: Option<&str>) -> std::io::Result<()> {
     let status = ProcessingStatus {
         processing: true,
         stage: stage.map(String::from),
+        owner_pid: std::process::id(),
     };
     let json = serde_json::to_string(&status)?;
     fs::write(path, json)
@@ -73,15 +75,25 @@ pub fn read_processing_status() -> ProcessingStatus {
         return ProcessingStatus {
             processing: false,
             stage: None,
+            owner_pid: 0,
         };
     }
 
     fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<ProcessingStatus>(&s).ok())
+        .and_then(|status| {
+            if status.owner_pid != 0 && is_process_alive(status.owner_pid) {
+                Some(status)
+            } else {
+                clear_processing_status().ok();
+                None
+            }
+        })
         .unwrap_or(ProcessingStatus {
             processing: false,
             stage: None,
+            owner_pid: 0,
         })
 }
 
@@ -255,6 +267,7 @@ mod tests {
         let status = read_processing_status();
         assert!(status.processing);
         assert_eq!(status.stage.as_deref(), Some("Transcribing audio"));
+        assert_eq!(status.owner_pid, std::process::id());
         clear_processing_status().unwrap();
     }
 }
