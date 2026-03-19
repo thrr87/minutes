@@ -41,6 +41,33 @@ This note captures what we can verify today about Claude Cowork and Dispatch fro
 - Claude Code plugin reference: <https://docs.claude.com/en/docs/claude-code/plugins-reference>
 - External field report: <https://www.macstories.net/stories/hands-on-with-claude-dispatch-for-cowork/>
 
+## Local Findings on This Machine
+
+The local Claude Desktop install gives us a few stronger signals than the public docs alone:
+
+- Claude stores installed extension packages under:
+  - `~/Library/Application Support/Claude/Claude Extensions/`
+- Per-extension settings live under:
+  - `~/Library/Application Support/Claude/Claude Extensions Settings/`
+- The machine already has multiple installed extensions with manifests and MCP-style server packaging, including:
+  - Anthropic-built extensions like Filesystem, Notes, Word, Excel, PowerPoint
+  - third-party / local extensions with `manifest.mcpb.json`
+- A sampled installed extension manifest includes:
+  - declared tool metadata
+  - a `server.mcp_config` block with command/args/env
+  - user-configurable fields
+- `claude_desktop_config.json` on this machine contains only high-level preferences and does not appear to be the place where arbitrary user MCP servers are being surfaced into Cowork.
+- Local Cowork / agent-mode session artifacts contain:
+  - `enabledMcpTools`
+  - a `cowork_plugins/` directory
+- A sampled local session had 200+ enabled tool IDs and **did not** contain any Minutes tool IDs.
+- There is currently **no installed Minutes extension** under `~/Library/Application Support/Claude/Claude Extensions/`.
+
+Current local conclusion:
+
+- The strongest available evidence on this machine points toward an extension/plugin-oriented integration model for Cowork, not “raw Minutes MCP server automatically appears everywhere.”
+- Minutes should be prepared to package a Cowork-facing extension or plugin surface if we want first-class Cowork behavior.
+
 ## Important Unknowns
 
 These are the biggest things the public docs do not fully settle:
