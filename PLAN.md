@@ -216,6 +216,315 @@ crates/cli/src/
 
 ---
 
+## Experience Strategy — Make Minutes Feel 10/10 Without Becoming A Clone
+
+This section captures the product-quality patterns worth learning from polished desktop capture tools while staying true to what makes **Minutes** distinct:
+
+- **Open source and inspectable**
+- **Local-first and privacy-first**
+- **CLI-friendly, scriptable, and automation-safe**
+- **Agent-native across Claude Desktop, Claude Code, Cowork, Codex, and OpenAI-compatible tool surfaces**
+- **Built for conversation memory, not just dictation or transient transcription**
+
+### Respectful Inspiration Rule
+
+We should borrow **interaction principles**, not assets, copy, or distinctive branded flourishes.
+
+What we can borrow:
+- Clear permission journeys
+- Immediate confidence cues when recording starts/stops
+- Thoughtful hotkey semantics
+- Strong first-run onboarding
+- Reliable menu bar behavior
+- Sensible update/distribution polish
+
+What we should explicitly not borrow:
+- Their wording, animation assets, sound files, iconography, or UI composition
+- Surveillance-heavy defaults that do not match our trust model
+- Product framing that positions Minutes as a dictation overlay instead of a memory layer
+
+### What Must Stay Uniquely Minutes
+
+Minutes is not primarily "voice-to-text anywhere." Minutes is:
+
+- A **conversation memory layer**
+- A **local markdown memory store** that remains useful outside any one app
+- A tool that works equally well from:
+  - Tauri menu bar app
+  - CLI
+  - MCP tools
+  - Claude Code plugin/skills
+  - Cowork/Dispatch workflows
+  - other agent/tool ecosystems that can call a CLI or MCP server
+
+The user should feel that the desktop app is the most polished surface, but **not the only first-class surface**.
+
+### Product Principles
+
+#### 1. Capture Confidence
+
+The user must always know:
+- whether recording has started
+- whether recording is still in progress
+- whether the capture was discarded, saved, or failed
+- where the output went
+- whether anything needs their attention
+
+Confidence cues must exist in every surface:
+
+| Surface | Start cue | Stop cue | Failure cue | Status surface |
+|--------|-----------|----------|-------------|----------------|
+| Menu bar app | tray/icon state + sound + inline timer | sound + state transition + refresh list | inline error + preserved capture path | tray + window |
+| CLI | immediate stderr text | completion JSON + saved path | explicit error + preserved WAV path | `minutes status` |
+| MCP/agent | clear textual confirmation | structured success result | actionable failure result | `get_status` |
+| Watcher/inbox | log entry + optional notification | saved markdown + source moved to processed | moved to failed + log | `minutes logs`, folder state |
+
+Design requirement:
+- Never silently lose a recording.
+- Never make a user wonder whether the microphone is actually live.
+- Never rely on one UI surface being open for state truth.
+
+#### 2. Permission Honesty
+
+Minutes should ask for only the permissions that directly support the selected workflow.
+
+Permission categories:
+- **Microphone**: required for live recording
+- **Calendar**: optional, useful for meeting suggestions and attendee enrichment
+- **Screen recording**: optional, future-facing, only if we truly add screen-context features
+- **Accessibility**: optional, only if we add global hotkeys or inline paste automation that genuinely requires it
+- **Full Disk Access**: avoid as a default strategy
+
+User-facing rule:
+- Every permission prompt must answer:
+  - what feature needs this
+  - whether it is optional
+  - what still works if the user says no
+
+Open-source trust rule:
+- Prefer capabilities that can be explained in one sentence and audited in code.
+- Avoid broad permissions unless the feature value is obvious and compelling.
+
+#### 3. One State Machine, Many Interfaces
+
+All capture entry points must hit the same underlying recording lifecycle:
+
+- tray start
+- CLI `minutes record`
+- MCP `start_recording`
+- future hotkey start
+- future calendar prompt "Record"
+- future shortcut or automation trigger
+
+This is a core Minutes advantage: the desktop app is not a separate product. It is a polished view over the same engine.
+
+Design rule:
+- Feature parity matters more than UI parity.
+- If a behavior exists in one surface, its state model and outputs must remain coherent in the others.
+
+#### 4. Markdown Is The Source Of Truth
+
+Minutes should continue to treat markdown output as the durable artifact, not a database-only internal representation.
+
+That means the "10/10" desktop experience must still preserve:
+- readable markdown
+- YAML frontmatter that agents can query
+- paths users can browse in Finder
+- easy grep/qmd/Obsidian compatibility
+
+The more polished the desktop app becomes, the more important it is to avoid locking critical meaning inside the app itself.
+
+#### 5. Agent-Native By Design
+
+Every user-facing workflow should be translatable to an agent/tool workflow.
+
+Examples:
+- "Start recording" → CLI + MCP + tray
+- "What did we decide?" → markdown frontmatter + MCP search + agent summary
+- "Any open action items for me?" → queryable structured output
+- "Record my thought and surface it in tomorrow's planning session" → watcher + MCP + Claude/Codex workflow
+
+Minutes should remain:
+- **Claude-native** without being Claude-exclusive
+- **Codex-friendly** because the CLI and markdown store are stable
+- **OpenAI-compatible** because the integration boundary is tool calling/MCP/CLI, not product-specific APIs
+
+### UX Opportunities Worth Adopting In A Minutes-Native Way
+
+#### A. Original Earcon System
+
+We should add a tiny, original Minutes sound system:
+- recording started
+- recording stopped and kept
+- error / capture failed
+- optional "processing complete"
+
+Guidelines:
+- subtle, short, utility-grade
+- shippable under MIT-compatible terms
+- fully optional in settings
+- consistent with CLI/MCP semantics
+
+Why this fits Minutes:
+- It helps menu bar and future hotkey flows without requiring constant visual attention.
+- It improves trust without changing the core data model.
+
+#### B. Intentional First-Run Onboarding
+
+Minutes should have an onboarding flow that feels distinctly like a local-first tool, not a SaaS funnel.
+
+Recommended sequence:
+1. What do you want to do first?
+   - Record meetings live
+   - Process voice memos
+   - Both
+2. Download transcription model
+3. Grant microphone access if needed
+4. Choose output folder / confirm default
+5. Offer optional enhancements:
+   - watch inbox folder
+   - connect calendar
+   - enable sounds
+   - enable hotkey later
+6. Run a 10-second test recording
+
+Minutes-native requirement:
+- The flow should end with a successful artifact, not just "setup complete."
+- After onboarding, the user should have exactly one real saved note or meeting file.
+
+#### C. Hotkeys, But Only If They Fit The Trust Model
+
+Hotkeys are attractive, but they should be treated as a deliberate Phase 3/4 feature, not casual polish.
+
+Rules:
+- No default accessibility permission ask just because hotkeys are cool.
+- Global hotkeys should be opt-in.
+- We should document the behavior before implementing it.
+
+Hotkey modes worth exploring:
+- hold-to-record quick thought
+- tap-to-lock hands-free recording
+- double-tap promotion to locked recording
+
+But the feature should be Minutes-native:
+- optimized for capturing ideas and meetings into durable memory
+- not optimized for rapid-fire inline dictation into arbitrary apps
+
+If we do add hotkeys, we should write a product behavior spec similar to a protocol doc:
+- minimum duration
+- discard rules
+- sounds or no sounds
+- lock-state transitions
+- what happens if a second interface stops the recording
+
+#### D. Inline Capture Without Surveillance Creep
+
+Future opportunity:
+- "Paste last transcript"
+- "Insert latest action items"
+- "Attach meeting note to current app context"
+
+But we should be careful:
+- Accessibility and screen recording are trust-heavy permissions.
+- These should be optional power-user flows, not part of the default narrative.
+
+Recommended product stance:
+- Phase 1-3: conversation memory first
+- Later: context-aware insertion only after the core memory workflow is excellent
+
+#### E. Distribution Polish For An Open-Source Mac App
+
+The open-source version should still feel premium in its operational polish.
+
+Recommended distribution plan:
+- signed and notarized releases
+- universal app bundle
+- stable menu bar behavior
+- sensible crash recovery
+- optional auto-update after trust is established
+
+Auto-update principle:
+- We can adopt Sparkle-style polish later, but only with:
+  - transparent release notes
+  - deterministic artifacts
+  - clear opt-in or clearly disclosed auto-update behavior
+  - a documented manual update path for users who prefer reproducibility
+
+### Explicit Non-Goals
+
+To avoid becoming a confused imitation of other tools, Minutes should not prioritize:
+
+- AI-screen-surveillance as a default feature
+- "dictation into every app" before memory quality is solved
+- flashy onboarding over reliable capture
+- proprietary lock-in over markdown portability
+- desktop-only features that break parity with CLI/MCP users
+
+### Concrete Plan Additions
+
+These are the product-quality tasks we should schedule after the current core roadmap items.
+
+#### Phase 3a: Capture Experience Excellence — "Calm, trusted, agent-native"
+
+**Goal**: make Minutes feel premium at the moment of capture without sacrificing portability or trust.
+
+| Task | Description | Beads ID |
+|------|-------------|----------|
+| P3a.1 | **Capture cue system** — original Minutes earcons for start, stop, complete, and error. Settings toggle + volume preset. Sounds must be short, subtle, and MIT-compatible. | TBD |
+| P3a.2 | **Permission center** — in-app status for microphone, calendar, watcher folder readiness, and future optional permissions. Every permission row explains value, optionality, and "what works without this". | TBD |
+| P3a.3 | **First successful artifact onboarding** — onboarding ends only after a real test recording or processed memo is saved to markdown. | TBD |
+| P3a.4 | **Surface parity audit** — ensure tray, CLI, MCP, and plugin flows all share the same success/failure semantics and user-facing messages. | TBD |
+| P3a.5 | **Recovery center** — expose failed captures, stale recordings, and retry actions in the desktop UI without hiding the underlying files. | TBD |
+| P3a.6 | **Completion notifications** — optional macOS notification when a long recording has finished processing and been written to disk. | TBD |
+| P3a.7 | **Output destination clarity** — every successful flow points clearly to the saved markdown path and, when relevant, the preserved source capture path. | TBD |
+
+#### Phase 3b: Optional Power Capture — "Fast capture for people who want it"
+
+**Goal**: add high-speed capture modes without making them the product's default identity.
+
+| Task | Description | Beads ID |
+|------|-------------|----------|
+| P3b.1 | **Hotkey behavior spec** — write a protocol document for hotkey recording semantics before implementing any global shortcut support. | TBD |
+| P3b.2 | **Opt-in global hotkey** — single configurable shortcut for quick capture, gated behind explicit permission flow only if needed. | TBD |
+| P3b.3 | **Quick thought mode** — short-form memo capture path optimized for spontaneous idea capture, still ending in normal markdown output. | TBD |
+| P3b.4 | **Paste latest artifact** — optional power-user command to paste the latest transcript/summary into the current app, clearly separated from core Minutes workflows. | TBD |
+
+#### Phase 3c: Open-Source Distribution Polish — "Trustworthy to install, boring to maintain"
+
+**Goal**: make the app operationally polished enough for non-technical users without compromising auditability.
+
+| Task | Description | Beads ID |
+|------|-------------|----------|
+| P3c.1 | Signed + notarized release pipeline for Minutes.app | TBD |
+| P3c.2 | Release channel policy — stable vs preview, changelog quality bar, rollback plan | TBD |
+| P3c.3 | Evaluate auto-update strategy (Sparkle or equivalent) with explicit OSS trust requirements and manual-update fallback | TBD |
+| P3c.4 | Reproducible release notes: what changed for CLI, desktop, and MCP users in each release | TBD |
+
+### Agent-Native Compatibility Checklist
+
+Every experience feature should be evaluated against this checklist before shipping:
+
+- Does it preserve CLI parity?
+- Does it preserve MCP parity?
+- Does it keep the markdown artifact as the durable truth?
+- Can a Claude/Codex/OpenAI-style agent explain it to the user with a stable tool contract?
+- Does it avoid forcing desktop-only workflows for core value?
+
+If the answer is "no" to multiple items, it is likely a sidecar feature, not a core Minutes feature.
+
+### The Bar For "10/10"
+
+Minutes is 10/10 when:
+
+- a first-time user can go from install → permission → first saved artifact in minutes
+- a power user can rely on it from terminal, tray, or agent without mental model drift
+- a recording never disappears silently
+- the app feels calm and trustworthy at the moment of capture
+- the markdown output remains useful even if the app disappeared tomorrow
+- Claude/Cowork/Codex-style workflows feel like a natural extension of the product, not a bolted-on integration layer
+
+---
+
 ## PARA Integration (for QMD/Obsidian users)
 
 Meetings and memos become first-class PARA entities:
