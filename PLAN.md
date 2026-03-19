@@ -586,6 +586,26 @@ These are the main execution dependencies for the new experience roadmap:
 - P3a.4 surface parity audit
 - P3a.3 artifact-first onboarding
 
+#### Phase 3a+: Taste & Polish — "The details that make it feel real"
+
+**Goal**: bridge the gap between "it works" and "I want to use this every day." These are the small things that compound into product love.
+
+| Task | Description | Beads ID |
+|------|-------------|----------|
+| P3a+.1 | **Processing progress indicator** — after stopping a recording, show real-time pipeline status in the UI (transcribing... summarizing... saving). The dead silence between "stop" and "saved" is the #1 taste gap. Whisper progress via callback, spinner with stage label. | TBD |
+| P3a+.2 | **Smart title generation** — after transcription, auto-generate a meaningful title from the first few sentences or pre-meeting context. "Q2 Pricing Discussion" > "Recording 2026-03-18 13:39". Falls back to timestamp if no speech detected. | TBD |
+| P3a+.3 | **In-app meeting detail view** — clicking a meeting opens a proper view inside the app: transcript with timestamps, highlighted action items, speaker labels, notes section, "Open in editor" button. This is where 80% of the perceived quality lives. | TBD |
+| P3a+.4 | **App icon and visual identity** — real app icon (not auto-generated microphone), considered typography choice, about screen. Doesn't need to be elaborate but needs to feel intentional. | TBD |
+| P3a+.5 | **Empty state = onboarding** — merge the onboarding flow into the empty state of the meeting list. No separate overlay — the empty state IS the setup experience, becoming the meeting list once the first recording is saved. | TBD |
+| P3a+.6 | **Transcript search highlighting** — when searching meetings, show highlighted match context in the meeting list items and in the detail view. Currently search returns results but doesn't show where the match was. | TBD |
+
+**Why this matters more than it looks:**
+- P3a+.1 (progress) directly addresses the "is it broken?" anxiety after every recording
+- P3a+.2 (titles) is the difference between a useful meeting list and a wall of timestamps
+- P3a+.3 (detail view) is the most-used screen after the first recording — it's currently `open` to a text editor
+- P3a+.4 (identity) is what people screenshot when they share the tool
+- P3a+.5 (empty=onboarding) eliminates the jarring overlay-to-empty-list transition
+
 #### Phase 3b: Optional Power Capture — "Fast capture for people who want it"
 
 **Goal**: add high-speed capture modes without making them the product's default identity.
