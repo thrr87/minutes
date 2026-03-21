@@ -391,6 +391,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn visibility_team_sets_0640_permissions() {
         let dir = TempDir::new().unwrap();
         let config = Config {
@@ -450,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn writes_markdown_with_correct_permissions() {
         let dir = TempDir::new().unwrap();
         let config = Config {

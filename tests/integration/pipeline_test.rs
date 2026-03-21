@@ -104,6 +104,7 @@ fn pipeline_rejects_nonexistent_file() {
 }
 
 #[test]
+#[cfg(unix)]
 fn markdown_permissions_are_0600() {
     use std::os::unix::fs::PermissionsExt;
 
