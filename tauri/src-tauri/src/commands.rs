@@ -282,8 +282,7 @@ pub fn request_stop(
                         let err = std::io::Error::last_os_error();
                         eprintln!(
                             "SIGTERM failed (PID {}): {} — sentinel file will stop recording",
-                            pid,
-                            err
+                            pid, err
                         );
                     }
                 }
