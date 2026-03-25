@@ -1874,6 +1874,14 @@ pub fn cmd_set_dictation_shortcut(
         .save()
         .map_err(|e| format!("Failed to save config: {}", e))?;
 
+    // Preload model when user enables dictation for the first time
+    if enabled {
+        let preload_config = Config::load();
+        std::thread::spawn(move || {
+            minutes_core::dictation::preload_model(&preload_config).ok();
+        });
+    }
+
     Ok(current_dictation_shortcut_settings(&state))
 }
 
@@ -2446,7 +2454,16 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         }
 
         // Dictation
-        ("dictation", "model") => config.dictation.model = value.clone(),
+        ("dictation", "model") => {
+            config.dictation.model = value.clone();
+            // Re-preload the new model in background so next dictation is instant
+            let preload_config = config.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = minutes_core::dictation::preload_model(&preload_config) {
+                    eprintln!("[dictation] model re-preload failed: {}", e);
+                }
+            });
+        }
         ("dictation", "daily_note_log") => {
             config.dictation.daily_note_log = value == "true";
         }

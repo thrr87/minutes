@@ -10,6 +10,95 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+// ── Model preload cache ──────────────────────────────────────
+//
+// The whisper model takes 1-15s to load depending on size and system load.
+// Preloading on app startup moves this cost to a background thread so the
+// first dictation press goes straight to "Listening..." with zero delay.
+//
+// The cache holds one model at a time. If the user changes the dictation
+// model in settings, the next preload_model() call replaces it.
+// The model is taken out during a session and returned when done.
+
+#[cfg(feature = "whisper")]
+struct CachedModel {
+    ctx: whisper_rs::WhisperContext,
+    model_name: String,
+}
+
+#[cfg(feature = "whisper")]
+static MODEL_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<CachedModel>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Preload the whisper model for dictation in the background.
+/// Call this on app startup. Safe to call multiple times — skips if
+/// the same model is already cached.
+#[cfg(feature = "whisper")]
+pub fn preload_model(config: &Config) -> Result<(), MinutesError> {
+    let model_name = config.dictation.model.clone();
+
+    // Check if already cached with the same model
+    if let Ok(cache) = MODEL_CACHE.lock() {
+        if let Some(ref cached) = *cache {
+            if cached.model_name == model_name {
+                tracing::info!(model = %model_name, "dictation model already preloaded");
+                return Ok(());
+            }
+        }
+    }
+
+    let model_path = crate::transcribe::resolve_model_path_for_dictation(config)?;
+    tracing::info!(model = %model_path.display(), "preloading whisper model for dictation");
+
+    let ctx = whisper_rs::WhisperContext::new_with_params(
+        model_path
+            .to_str()
+            .ok_or_else(|| TranscribeError::ModelLoadError("invalid path".into()))?,
+        whisper_rs::WhisperContextParameters::default(),
+    )
+    .map_err(|e| TranscribeError::ModelLoadError(format!("{}", e)))?;
+
+    if let Ok(mut cache) = MODEL_CACHE.lock() {
+        *cache = Some(CachedModel {
+            ctx,
+            model_name: model_name.clone(),
+        });
+    }
+
+    tracing::info!(model = %model_name, "dictation model preloaded successfully");
+    Ok(())
+}
+
+/// Preload stub when whisper feature is disabled.
+#[cfg(not(feature = "whisper"))]
+pub fn preload_model(_config: &Config) -> Result<(), MinutesError> {
+    Ok(())
+}
+
+/// Take the cached model out for use during a dictation session.
+/// Returns None if no model is cached or the model name doesn't match.
+#[cfg(feature = "whisper")]
+fn take_cached_model(model_name: &str) -> Option<whisper_rs::WhisperContext> {
+    let mut cache = MODEL_CACHE.lock().ok()?;
+    let cached = cache.as_ref()?;
+    if cached.model_name == model_name {
+        cache.take().map(|c| c.ctx)
+    } else {
+        None
+    }
+}
+
+/// Return a model to the cache after a dictation session.
+#[cfg(feature = "whisper")]
+fn return_model_to_cache(ctx: whisper_rs::WhisperContext, model_name: String) {
+    if let Ok(mut cache) = MODEL_CACHE.lock() {
+        *cache = Some(CachedModel {
+            ctx,
+            model_name,
+        });
+    }
+}
+
 // ──────────────────────────────────────────────────────────────
 // Dictation pipeline:
 //
@@ -118,14 +207,16 @@ where
     F: FnMut(DictationEvent),
     G: FnMut(DictationResult),
 {
-    // Resolve and load whisper model once for the session
+    // Try to use preloaded model, fall back to loading on demand
     #[cfg(feature = "whisper")]
-    let model_path = crate::transcribe::resolve_model_path_for_dictation(config)?;
+    let model_name = config.dictation.model.clone();
     #[cfg(feature = "whisper")]
-    tracing::info!(model = %model_path.display(), "loading whisper model for dictation");
-
-    #[cfg(feature = "whisper")]
-    let whisper_ctx = {
+    let whisper_ctx = if let Some(ctx) = take_cached_model(&model_name) {
+        tracing::info!(model = %model_name, "using preloaded whisper model");
+        ctx
+    } else {
+        let model_path = crate::transcribe::resolve_model_path_for_dictation(config)?;
+        tracing::info!(model = %model_path.display(), "loading whisper model on demand");
         let ctx = whisper_rs::WhisperContext::new_with_params(
             model_path
                 .to_str()
@@ -274,6 +365,9 @@ where
                 }
             }
         }
+
+        // Return model to cache for next session
+        return_model_to_cache(whisper_ctx, model_name);
 
         Ok(())
     }
