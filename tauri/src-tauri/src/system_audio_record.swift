@@ -17,6 +17,12 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     private var lastReportedSystemLive = false
     private var lastReportedMicLive = false
 
+    // Per-source stem writers
+    private var voiceStemFile: AVAudioFile?
+    private var systemStemFile: AVAudioFile?
+    private var voiceStemURL: URL?
+    private var systemStemURL: URL?
+
     init(outputURL: URL) {
         self.outputURL = outputURL
     }
@@ -70,6 +76,13 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         )
 
         try stream.addRecordingOutput(recordingOutput)
+
+        // Derive stem paths BEFORE startCapture to avoid race with early samples
+        let baseName = outputURL.deletingPathExtension().lastPathComponent
+        let stemDir = outputURL.deletingLastPathComponent()
+        voiceStemURL = stemDir.appendingPathComponent("\(baseName).voice.wav")
+        systemStemURL = stemDir.appendingPathComponent("\(baseName).system.wav")
+
         try await stream.startCapture()
 
         startMonitoring()
@@ -79,6 +92,14 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     }
 
     func stop() async {
+        // Flush and close stem files on the sample queue to serialize
+        // with any in-flight writeStemSamples calls. Without this,
+        // nil'ing on the main thread races with writes on sampleQueue.
+        sampleQueue.sync {
+            voiceStemFile = nil
+            systemStemFile = nil
+        }
+
         guard let stream else {
             exit(0)
         }
@@ -126,16 +147,151 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         switch outputType {
         case .audio:
             lastSystemAudioSampleAt = now
+            writeStemSamples(sampleBuffer, source: .audio)
         case .microphone:
             lastMicSampleAt = now
+            writeStemSamples(sampleBuffer, source: .microphone)
         default:
             break
+        }
+    }
+
+    private func writeStemSamples(_ sampleBuffer: CMSampleBuffer, source: SCStreamOutputType) {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee else {
+            return
+        }
+
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            return
+        }
+
+        let sampleCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard sampleCount > 0 else { return }
+
+        var lengthAtOffset: Int = 0
+        var totalLength: Int = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
+        guard status == kCMBlockBufferNoErr, let data = dataPointer else {
+            return
+        }
+
+        let channelCount = Int(asbd.mChannelsPerFrame)
+        let sampleRate = asbd.mSampleRate
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+
+        // Stems are always mono float32 — mix down if multi-channel
+        guard let monoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else { return }
+
+        // Lazily create the stem file on first samples
+        let stemFile: AVAudioFile?
+        switch source {
+        case .microphone:
+            if voiceStemFile == nil, let url = voiceStemURL {
+                do {
+                    voiceStemFile = try AVAudioFile(forWriting: url, settings: monoFormat.settings)
+                } catch {
+                    fputs("failed to create voice stem file: \(error)\n", stderr)
+                }
+            }
+            stemFile = voiceStemFile
+        case .audio:
+            if systemStemFile == nil, let url = systemStemURL {
+                do {
+                    systemStemFile = try AVAudioFile(forWriting: url, settings: monoFormat.settings)
+                } catch {
+                    fputs("failed to create system stem file: \(error)\n", stderr)
+                }
+            }
+            stemFile = systemStemFile
+        default:
+            return
+        }
+
+        guard let file = stemFile else { return }
+
+        // Mix multi-channel source data to mono float32.
+        // ScreenCaptureKit may deliver interleaved or non-interleaved audio.
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let frameCount = AVAudioFrameCount(sampleCount)
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: frameCount) else {
+            return
+        }
+        pcmBuffer.frameLength = frameCount
+
+        guard let monoPtr = pcmBuffer.floatChannelData?[0] else { return }
+        let bytesPerSample = isFloat ? 4 : 2
+
+        if isNonInterleaved {
+            // Non-interleaved: each channel is a separate plane of `frameCount` samples.
+            // The CMBlockBuffer contains them sequentially: [ch0 frames][ch1 frames]...
+            let planeSize = Int(frameCount) * bytesPerSample
+            for frame in 0..<Int(frameCount) {
+                var sum: Float = 0.0
+                for ch in 0..<channelCount {
+                    let offset = ch * planeSize + frame * bytesPerSample
+                    guard offset + bytesPerSample <= totalLength else { break }
+                    if isFloat {
+                        var val: Float = 0.0
+                        memcpy(&val, data.advanced(by: offset), 4)
+                        sum += val
+                    } else {
+                        var val: Int16 = 0
+                        memcpy(&val, data.advanced(by: offset), 2)
+                        sum += Float(val) / 32768.0
+                    }
+                }
+                monoPtr[frame] = sum / Float(channelCount)
+            }
+        } else {
+            // Interleaved: samples are [ch0 ch1 ch0 ch1 ...]
+            for frame in 0..<Int(frameCount) {
+                var sum: Float = 0.0
+                for ch in 0..<channelCount {
+                    let offset = (frame * channelCount + ch) * bytesPerSample
+                    guard offset + bytesPerSample <= totalLength else { break }
+                    if isFloat {
+                        var val: Float = 0.0
+                        memcpy(&val, data.advanced(by: offset), 4)
+                        sum += val
+                    } else {
+                        var val: Int16 = 0
+                        memcpy(&val, data.advanced(by: offset), 2)
+                        sum += Float(val) / 32768.0
+                    }
+                }
+                monoPtr[frame] = sum / Float(channelCount)
+            }
+        }
+
+        do {
+            try file.write(from: pcmBuffer)
+        } catch {
+            fputs("stem write failed: \(error)\n", stderr)
         }
     }
 
     func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {
         print("ready")
         fflush(stdout)
+
+        // Report stem paths so the Rust side knows where to find them
+        let stemInfo: [String: Any] = [
+            "event": "stems",
+            "voice_stem": voiceStemURL?.path ?? "",
+            "system_stem": systemStemURL?.path ?? ""
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: stemInfo),
+           let json = String(data: data, encoding: .utf8) {
+            print(json)
+            fflush(stdout)
+        }
     }
 
     func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {

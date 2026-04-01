@@ -253,6 +253,20 @@ pub struct RecordingConfig {
     /// Allow Minutes to start a call capture even when the selected input
     /// looks like a plain microphone rather than a system-audio route.
     pub allow_degraded_call_capture: bool,
+    /// Multi-source capture: explicit voice + call device names.
+    /// When set, `device` is ignored. CLI `--source` flags override this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<SourcesConfig>,
+}
+
+/// Multi-source capture configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourcesConfig {
+    /// Voice (microphone) device name, or "default" for system default.
+    pub voice: Option<String>,
+    /// Call (system audio) device name, or "auto" to detect loopback devices.
+    pub call: Option<String>,
 }
 
 impl Default for RecordingConfig {
@@ -263,6 +277,7 @@ impl Default for RecordingConfig {
             device: None,
             auto_call_intent: false,
             allow_degraded_call_capture: false,
+            sources: None,
         }
     }
 }

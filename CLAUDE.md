@@ -245,10 +245,11 @@ minutes/
 ├── BUILD-STATUS.md            # Build progress tracker
 ├── Cargo.toml                 # Workspace root
 ├── crates/
-│   ├── core/src/              # 27 Rust modules — the engine
-│   │   ├── capture.rs         # Audio capture (cpal)
+│   ├── core/src/              # 28 Rust modules — the engine
+│   │   ├── capture.rs         # Audio capture (cpal), device categorization, loopback detection
+│   │   ├── resample.rs        # Shared mono-downmix + 16kHz decimation resampler (used by capture + streaming)
 │   │   ├── transcribe.rs      # Whisper.cpp transcription (delegates to whisper-guard for anti-hallucination, optional nnnoiseless denoise)
-│   │   ├── diarize.rs         # Speaker diarization + attribution types (pyannote-rs native or pyannote subprocess)
+│   │   ├── diarize.rs         # Speaker diarization + attribution types (pyannote-rs, or energy-based from per-source stems)
 │   │   ├── summarize.rs       # LLM summarization + speaker mapping (ureq HTTP client)
 │   │   ├── voice.rs           # Voice profile storage and matching (voices.db, enrollment, cosine similarity)
 │   │   ├── pipeline.rs        # Orchestrates the full flow + structured extraction
@@ -261,7 +262,7 @@ minutes/
 │   │   ├── events.rs          # Append-only JSONL event log for agent reactivity
 │   │   ├── device_monitor.rs  # Audio device change detection (CoreAudio listener + auto-reconnect)
 │   │   ├── streaming_whisper.rs # Progressive transcription (partial results every 2s)
-│   │   ├── streaming.rs       # Streaming state machine for live transcription
+│   │   ├── streaming.rs       # Streaming audio capture (AudioStream, MultiAudioStream for multi-source)
 │   │   ├── logging.rs         # Structured JSON logging
 │   │   ├── error.rs           # Per-module error types (thiserror)
 │   │   ├── calendar.rs        # Calendar integration (upcoming meetings)
@@ -274,7 +275,7 @@ minutes/
 │   │   ├── vad.rs             # Voice activity detection
 │   │   └── vault.rs           # Obsidian/Logseq vault sync
 │   ├── whisper-guard/          # Standalone anti-hallucination toolkit (segment dedup, silence strip, whisper params)
-│   ├── cli/                   # CLI binary — 32 commands
+│   ├── cli/                   # CLI binary — 33 commands
 │   ├── reader/                # Lightweight read-only meeting parser (no audio deps)
 │   ├── assets/                # Bundled assets (demo.wav)
 │   └── mcp/                   # MCP server — 23 tools + 6 resources + MCP App dashboard
@@ -343,12 +344,12 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Test Coverage
 
-~277 tests total:
+~290 tests total:
 - 49 whisper-guard unit tests (resample, normalize, strip_silence, dedup_segments, dedup_interleaved, collapse_noise_markers, strip_foreign_script, trim_trailing_noise, clean_transcript + 1 doctest)
-- 124 core unit tests (all modules including screen, calendar, config, watch, streaming whisper, vault, dictation, live_transcript, health, vad, hotkey)
+- 130 core unit tests (all modules including screen, calendar, config, watch, streaming whisper, vault, dictation, live_transcript, health, vad, hotkey, device_monitor, diarize)
 - 10 integration tests (pipeline, permissions, collisions, search filters)
-- 23 Tauri unit tests (commands, call detection)
-- 2 CLI tests
+- 33 Tauri unit tests (commands, call detection, call capture)
+- 11 CLI tests
 - 6 reader crate tests (search, parse)
 - 30 reader.ts unit tests (vitest — frontmatter parsing, listing, search, actions, profiles; reader lives in crates/sdk/src/reader.ts)
 - 8 MCP integration tests (CLI JSON output, TypeScript compilation)

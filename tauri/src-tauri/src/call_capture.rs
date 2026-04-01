@@ -22,10 +22,19 @@ pub struct CallSourceHealth {
     pub last_update: String,
 }
 
+/// Paths to per-source audio stems written by the native call helper.
+#[derive(Debug, Clone)]
+pub struct StemPaths {
+    pub voice: PathBuf,
+    pub system: PathBuf,
+}
+
 pub struct NativeCallCaptureSession {
     child: Child,
     output_path: PathBuf,
     health: Arc<Mutex<CallSourceHealth>>,
+    #[allow(dead_code)] // used once pipeline stem attribution is wired up
+    stem_paths: Arc<Mutex<Option<StemPaths>>>,
 }
 
 fn parse_macos_major_version(version: &str) -> Option<u32> {
@@ -47,6 +56,16 @@ fn macos_major_version() -> Option<u32> {
 impl NativeCallCaptureSession {
     pub fn output_path(&self) -> &Path {
         &self.output_path
+    }
+
+    /// Return per-source stem paths if the helper reported them and the files exist.
+    #[allow(dead_code)] // used once pipeline stem attribution is wired up
+    pub fn stem_paths(&self) -> Option<StemPaths> {
+        self.stem_paths
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .filter(|stems| stems.voice.exists() && stems.system.exists())
     }
 
     pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, String> {
@@ -179,7 +198,9 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
         .take()
         .ok_or_else(|| "native call helper did not expose stdout".to_string())?;
     let (tx, rx) = mpsc::channel();
+    let stem_paths: Arc<Mutex<Option<StemPaths>>> = Arc::new(Mutex::new(None));
     let health_for_thread = Arc::clone(&health);
+    let stems_for_thread = Arc::clone(&stem_paths);
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
@@ -221,18 +242,39 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
             }
 
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                if value.get("event").and_then(|v| v.as_str()) == Some("health") {
-                    if let Ok(mut current) = health_for_thread.lock() {
-                        current.mic_live = value
-                            .get("mic_live")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        current.call_audio_live = value
-                            .get("call_audio_live")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        current.last_update = chrono::Local::now().to_rfc3339();
+                match value.get("event").and_then(|v| v.as_str()) {
+                    Some("health") => {
+                        if let Ok(mut current) = health_for_thread.lock() {
+                            current.mic_live = value
+                                .get("mic_live")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            current.call_audio_live = value
+                                .get("call_audio_live")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            current.last_update = chrono::Local::now().to_rfc3339();
+                        }
                     }
+                    Some("stems") => {
+                        let voice = value
+                            .get("voice_stem")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let system = value
+                            .get("system_stem")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !voice.is_empty() && !system.is_empty() {
+                            if let Ok(mut guard) = stems_for_thread.lock() {
+                                *guard = Some(StemPaths {
+                                    voice: PathBuf::from(voice),
+                                    system: PathBuf::from(system),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -243,6 +285,7 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
             child,
             output_path,
             health,
+            stem_paths,
         }),
         Ok(Ok(line)) => {
             let _ = child.kill();

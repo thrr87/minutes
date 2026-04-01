@@ -155,8 +155,194 @@ fn preprocess_audio(audio_path: &Path) -> (std::path::PathBuf, Option<std::path:
     }
 }
 
+/// Paths to per-source audio stems from a multi-source call capture.
+#[derive(Debug, Clone)]
+pub struct StemPaths {
+    pub voice: std::path::PathBuf,
+    pub system: std::path::PathBuf,
+}
+
+/// Discover stem files alongside an audio file.
+/// The native call helper writes `{basename}.voice.wav` and `{basename}.system.wav`
+/// next to the main recording. Returns Some only if both files exist and are non-empty.
+pub fn discover_stems(audio_path: &Path) -> Option<StemPaths> {
+    let stem = audio_path.file_stem()?.to_str()?;
+    let dir = audio_path.parent()?;
+    let voice = dir.join(format!("{}.voice.wav", stem));
+    let system = dir.join(format!("{}.system.wav", stem));
+
+    let voice_ok = std::fs::metadata(&voice)
+        .map(|m| m.len() > 44) // WAV header is 44 bytes; must have actual data
+        .unwrap_or(false);
+    let system_ok = std::fs::metadata(&system)
+        .map(|m| m.len() > 44)
+        .unwrap_or(false);
+
+    if voice_ok && system_ok {
+        tracing::info!(
+            voice = %voice.display(),
+            system = %system.display(),
+            "discovered per-source audio stems"
+        );
+        Some(StemPaths { voice, system })
+    } else {
+        None
+    }
+}
+
+/// Compute RMS energy per time window from a WAV file.
+/// Returns a vec of (start_secs, rms) tuples, one per window.
+fn compute_energy_windows(wav_path: &Path, window_secs: f64) -> Result<Vec<(f64, f32)>, String> {
+    let reader = hound::WavReader::open(wav_path)
+        .map_err(|e| format!("failed to open stem {}: {}", wav_path.display(), e))?;
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate as f64;
+    let window_samples = (sample_rate * window_secs) as usize;
+
+    if window_samples == 0 {
+        return Err("window too small".into());
+    }
+
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .filter_map(|s| s.ok())
+            .collect(),
+        hound::SampleFormat::Int => {
+            let bits = spec.bits_per_sample;
+            let max_val = (1i64 << (bits - 1)) as f32;
+            reader
+                .into_samples::<i32>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f32 / max_val)
+                .collect()
+        }
+    };
+
+    // Mix to mono if multi-channel
+    let channels = spec.channels as usize;
+    let mono: Vec<f32> = if channels > 1 {
+        samples
+            .chunks(channels)
+            .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+            .collect()
+    } else {
+        samples
+    };
+
+    let mut windows = Vec::new();
+    for (i, chunk) in mono.chunks(window_samples).enumerate() {
+        let sum_sq: f64 = chunk.iter().map(|&s| (s as f64) * (s as f64)).sum();
+        let rms = (sum_sq / chunk.len() as f64).sqrt() as f32;
+        let start = i as f64 * window_secs;
+        windows.push((start, rms));
+    }
+
+    Ok(windows)
+}
+
+/// Speaker attribution from per-source audio stems (no ML diarization).
+/// Compares energy levels between voice and system stems per time window,
+/// assigning "SPEAKER_0" (you) or "SPEAKER_1" (remote) to each window.
+pub fn diarize_from_stems(stems: &StemPaths, _config: &Config) -> Option<DiarizationResult> {
+    let window_secs = 1.0; // 1-second energy windows
+
+    let voice_energy = match compute_energy_windows(&stems.voice, window_secs) {
+        Ok(e) => e,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to read voice stem, falling back to ML diarization");
+            return None;
+        }
+    };
+    let system_energy = match compute_energy_windows(&stems.system, window_secs) {
+        Ok(e) => e,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to read system stem, falling back to ML diarization");
+            return None;
+        }
+    };
+
+    // Energy threshold: below this RMS, the source is considered silent.
+    // Typical speech RMS is 0.01-0.1; noise floor is <0.001.
+    let silence_threshold = 0.005_f32;
+
+    let mut segments: Vec<SpeakerSegment> = Vec::new();
+    let window_count = voice_energy.len().min(system_energy.len());
+
+    // Use SPEAKER_0/SPEAKER_1 labels to match apply_speakers expectations.
+    // The attribution pipeline maps these to real names via speaker_map.
+    let voice_label = "SPEAKER_0";
+    let call_label = "SPEAKER_1";
+
+    for i in 0..window_count {
+        let (start, voice_rms) = voice_energy[i];
+        let (_, system_rms) = system_energy[i];
+        let end = start + window_secs;
+
+        let voice_active = voice_rms > silence_threshold;
+        let system_active = system_rms > silence_threshold;
+
+        let speaker = if voice_active && !system_active {
+            voice_label.to_string()
+        } else if system_active && !voice_active {
+            call_label.to_string()
+        } else if voice_active && system_active {
+            if voice_rms >= system_rms {
+                voice_label.to_string()
+            } else {
+                call_label.to_string()
+            }
+        } else {
+            continue; // Both silent, skip
+        };
+
+        // Merge with previous segment if same speaker
+        if let Some(last) = segments.last_mut() {
+            if last.speaker == speaker && (start - last.end).abs() < 0.01 {
+                last.end = end;
+                continue;
+            }
+        }
+
+        segments.push(SpeakerSegment {
+            speaker,
+            start,
+            end,
+        });
+    }
+
+    let num_speakers = segments
+        .iter()
+        .map(|s| s.speaker.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    // If no segments were produced (both stems are silent), fall back to ML
+    if segments.is_empty() {
+        tracing::warn!("stem-based diarization produced no segments (all silent), falling back");
+        return None;
+    }
+
+    tracing::info!(
+        speakers = num_speakers,
+        segments = segments.len(),
+        voice_stem = %stems.voice.display(),
+        system_stem = %stems.system.display(),
+        "stem-based diarization complete"
+    );
+
+    Some(DiarizationResult {
+        segments,
+        num_speakers,
+        speaker_embeddings: std::collections::HashMap::new(),
+    })
+}
+
 /// Run speaker diarization on an audio file.
 /// Returns None if diarization is disabled or models are not available.
+///
+/// When per-source stems are available alongside the audio file,
+/// uses energy-based attribution instead of ML diarization.
 ///
 /// Engine options:
 /// - `"auto"` (default): use pyannote-rs if models are downloaded, otherwise skip
@@ -168,6 +354,16 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
 
     if engine == "none" {
         return None;
+    }
+
+    // Check for per-source stems alongside the audio file.
+    // If stems exist, use energy-based attribution (zero ML cost).
+    if let Some(stems) = discover_stems(audio_path) {
+        if let Some(result) = diarize_from_stems(&stems, config) {
+            return Some(result);
+        }
+        // Stem attribution failed, fall through to ML diarization
+        tracing::warn!("stem-based diarization failed, falling back to ML engine");
     }
 
     // "auto" mode: use pyannote-rs if models are downloaded, otherwise skip silently

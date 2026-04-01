@@ -54,6 +54,15 @@ enum Commands {
         /// Overrides the [recording] device setting in config.toml.
         #[arg(short = 'D', long)]
         device: Option<String>,
+
+        /// Capture source (repeatable). Specify two for multi-source capture.
+        /// Example: --source "Yeti Nano" --source "BlackHole 2ch"
+        #[arg(long)]
+        source: Vec<String>,
+
+        /// Shorthand for --intent call with auto-detected system audio device.
+        #[arg(long)]
+        call: bool,
     },
 
     /// Add a note to the current recording
@@ -332,6 +341,9 @@ enum Commands {
     /// List available audio input devices
     Devices,
 
+    /// List audio input devices grouped by category (Microphones / System Audio / Virtual)
+    Sources,
+
     /// Install or uninstall the folder watcher as a login service
     Service {
         /// Action: install or uninstall
@@ -549,14 +561,64 @@ fn main() -> Result<()> {
             allow_degraded,
             language,
             device,
+            source,
+            call,
         } => {
             if let Some(lang) = language {
                 config.transcription.language = Some(lang);
             }
-            if let Some(dev) = device {
+
+            // CLI flags > [recording.sources] > device
+            if !source.is_empty() {
+                if source.len() >= 2 {
+                    // Multi-source CLI recording: use voice device, warn that
+                    // call device capture is handled by the desktop app
+                    eprintln!(
+                        "[minutes] Multi-source CLI recording is not yet implemented.\n\
+                         Using '{}' as the recording device.\n\
+                         For dual-source call capture, use the Minutes desktop app.",
+                        source[0]
+                    );
+                }
+                config.recording.device = source.first().cloned();
+            } else if call {
+                // --call with auto-detect: resolve loopback device
+                if let Some(loopback) = minutes_core::capture::detect_loopback_device() {
+                    eprintln!(
+                        "[minutes] Multi-source CLI recording is not yet implemented.\n\
+                         Detected system audio device: {}\n\
+                         For dual-source call capture, use the Minutes desktop app.\n\
+                         Recording from microphone with --intent call.",
+                        loopback
+                    );
+                } else {
+                    eprintln!(
+                        "[minutes] No system audio device detected.\n\
+                         To capture call audio, install a loopback driver:\n\
+                           macOS: brew install blackhole-2ch\n\
+                         Or use the Minutes desktop app for native call capture."
+                    );
+                }
+                if let Some(dev) = device {
+                    config.recording.device = Some(dev);
+                }
+            } else if let Some(dev) = device {
                 config.recording.device = Some(dev);
             }
-            cmd_record(title, context, &mode, &intent, allow_degraded, &config)
+
+            let effective_intent = if call && intent == "auto" {
+                "call"
+            } else {
+                &intent
+            };
+            cmd_record(
+                title,
+                context,
+                &mode,
+                effective_intent,
+                allow_degraded,
+                &config,
+            )
         }
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         Commands::Stop => cmd_stop(&config),
@@ -654,6 +716,7 @@ fn main() -> Result<()> {
             cmd_dictate(stdout, note_only, &config)
         }
         Commands::Devices => cmd_devices(),
+        Commands::Sources => cmd_sources(),
         Commands::Setup {
             model,
             list,
@@ -1979,6 +2042,77 @@ fn cmd_devices() -> Result<()> {
     eprintln!("\nTip: Install VB-CABLE for system audio capture: https://vb-audio.com/Cable/");
     #[cfg(target_os = "linux")]
     eprintln!("\nTip: Use a PulseAudio monitor source for system audio capture");
+
+    Ok(())
+}
+
+fn cmd_sources() -> Result<()> {
+    use minutes_core::capture::{list_devices_categorized, DeviceCategory};
+
+    let devices = list_devices_categorized();
+    if devices.is_empty() {
+        eprintln!("No audio input devices found.");
+        return Ok(());
+    }
+
+    let mics: Vec<_> = devices
+        .iter()
+        .filter(|d| d.category == DeviceCategory::Microphone)
+        .collect();
+    let system: Vec<_> = devices
+        .iter()
+        .filter(|d| d.category == DeviceCategory::SystemAudio)
+        .collect();
+    let virtual_devs: Vec<_> = devices
+        .iter()
+        .filter(|d| d.category == DeviceCategory::Virtual)
+        .collect();
+
+    eprintln!("Microphones:");
+    for d in &mics {
+        let marker = if d.is_default { "* " } else { "  " };
+        eprintln!(
+            "  {}{} ({}Hz, {} ch)",
+            marker, d.name, d.sample_rate, d.channels
+        );
+    }
+
+    if !system.is_empty() {
+        eprintln!("\nSystem Audio:");
+        for d in &system {
+            eprintln!("    {} ({}Hz, {} ch)", d.name, d.sample_rate, d.channels);
+        }
+    } else {
+        eprintln!("\nSystem Audio:");
+        eprintln!("    (none detected)");
+        #[cfg(target_os = "macos")]
+        eprintln!("    Install a loopback driver: brew install blackhole-2ch");
+        #[cfg(target_os = "linux")]
+        eprintln!("    PipeWire monitor sources should appear here automatically");
+        eprintln!("    Or use the Minutes desktop app for native call capture (no driver needed).");
+    }
+
+    if !virtual_devs.is_empty() {
+        eprintln!("\nVirtual Devices:");
+        for d in &virtual_devs {
+            eprintln!("    {} ({}Hz, {} ch)", d.name, d.sample_rate, d.channels);
+        }
+    }
+
+    // JSON output to stdout
+    let json_devices: Vec<serde_json::Value> = devices
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "name": d.name,
+                "category": format!("{:?}", d.category),
+                "sample_rate": d.sample_rate,
+                "channels": d.channels,
+                "is_default": d.is_default,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&json_devices)?);
 
     Ok(())
 }

@@ -63,6 +63,9 @@ const DEVICE_CHECK_SILENCE_SECS: u64 = 5;
 
 /// Build a cpal input stream that writes resampled 16kHz mono into the shared WAV writer.
 /// Returns the stream handle and the device name string.
+///
+/// Delegates mono-downmix + decimation to `resample::build_resampled_input_stream`,
+/// then converts f32 samples to i16 for the WAV writer and updates the audio level meter.
 fn build_capture_stream(
     device: &cpal::Device,
     writer: &Arc<std::sync::Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>,
@@ -70,169 +73,50 @@ fn build_capture_stream(
     sample_count: &Arc<std::sync::atomic::AtomicU64>,
     err_flag: &Arc<AtomicBool>,
 ) -> Result<cpal::Stream, CaptureError> {
-    use cpal::traits::{DeviceTrait, StreamTrait};
-
-    let supported_config = device
-        .default_input_config()
-        .map_err(|e| CaptureError::Io(std::io::Error::other(format!("input config: {}", e))))?;
-
-    let sample_rate = supported_config.sample_rate().0;
-    let channels = supported_config.channels();
-    let ratio = sample_rate as f64 / 16000.0;
-
-    tracing::info!(
-        sample_rate,
-        channels,
-        format = ?supported_config.sample_format(),
-        "audio capture config"
-    );
-
     let writer_clone = Arc::clone(writer);
-    let stop_clone = Arc::clone(stop_flag);
     let sample_count_clone = Arc::clone(sample_count);
-    let err_flag_clone = Arc::clone(err_flag);
 
-    let stream = match supported_config.sample_format() {
-        cpal::SampleFormat::F32 => {
-            let ch = channels as usize;
-            let mut resample_pos: f64 = 0.0;
-            let mut input_samples: Vec<f32> = Vec::new();
-            let mut level_accum: f64 = 0.0;
-            let mut level_count: u32 = 0;
-            let level_interval = sample_rate / 10; // ~10 updates/sec
+    // Level meter state — updated from the resampled samples (~10x/sec)
+    let mut level_accum: f64 = 0.0;
+    let mut level_count: u32 = 0;
 
-            device
-                .build_input_stream(
-                    &supported_config.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if stop_clone.load(Ordering::Relaxed) {
-                            return;
-                        }
+    // We'll set the level_interval once we know the native sample rate.
+    // For now, use a placeholder; it gets set after build_resampled_input_stream returns the config.
+    // Actually, the callback receives resampled 16kHz samples, so the interval should be
+    // based on 16kHz: ~1600 samples for 10 updates/sec.
+    let level_interval: u32 = 1600; // 16000 / 10
 
-                        // Mix to mono, compute RMS for level meter
-                        for chunk in data.chunks(ch) {
-                            let mono: f32 = chunk.iter().sum::<f32>() / ch as f32;
-                            input_samples.push(mono);
-                            level_accum += (mono as f64) * (mono as f64);
-                            level_count += 1;
-                            if level_count >= level_interval {
-                                let rms = (level_accum / level_count as f64).sqrt();
-                                // Scale to 0-100 (raw mic levels are low, ~0.001–0.05)
-                                let level = (rms * 2000.0).min(100.0) as u32;
-                                AUDIO_LEVEL.store(level, Ordering::Relaxed);
-                                level_accum = 0.0;
-                                level_count = 0;
-                            }
-                        }
+    let (stream, _device_name, _config) = crate::resample::build_resampled_input_stream(
+        device,
+        stop_flag,
+        err_flag,
+        move |resampled: &[f32]| {
+            // Update audio level meter from resampled mono f32 samples
+            for &sample in resampled {
+                level_accum += (sample as f64) * (sample as f64);
+                level_count += 1;
+                if level_count >= level_interval {
+                    let rms = (level_accum / level_count as f64).sqrt();
+                    let level = (rms * 2000.0).min(100.0) as u32;
+                    AUDIO_LEVEL.store(level, Ordering::Relaxed);
+                    level_accum = 0.0;
+                    level_count = 0;
+                }
+            }
 
-                        // Downsample to 16kHz using simple decimation with averaging
-                        let mut guard = writer_clone.lock().unwrap();
-                        if let Some(ref mut w) = *guard {
-                            while resample_pos < input_samples.len() as f64 {
-                                let idx = resample_pos as usize;
-                                if idx < input_samples.len() {
-                                    let sample = (input_samples[idx] * 32767.0)
-                                        .clamp(-32768.0, 32767.0)
-                                        as i16;
-                                    if w.write_sample(sample).is_err() {
-                                        return;
-                                    }
-                                    sample_count_clone.fetch_add(1, Ordering::Relaxed);
-                                }
-                                resample_pos += ratio;
-                            }
-                            // Keep remainder for next callback
-                            let consumed = resample_pos as usize;
-                            if consumed > 0 && consumed <= input_samples.len() {
-                                input_samples.drain(..consumed);
-                                resample_pos -= consumed as f64;
-                            }
-                        }
-                    },
-                    move |err| {
-                        tracing::error!("audio stream error: {}", err);
-                        err_flag_clone.store(true, Ordering::Relaxed);
-                    },
-                    None,
-                )
-                .map_err(|e| {
-                    CaptureError::Io(std::io::Error::other(format!("build stream: {}", e)))
-                })?
-        }
-        cpal::SampleFormat::I16 => {
-            let ch = channels as usize;
-            let mut resample_pos: f64 = 0.0;
-            let mut input_samples: Vec<f32> = Vec::new();
-            let mut level_accum: f64 = 0.0;
-            let mut level_count: u32 = 0;
-            let level_interval = sample_rate / 10;
-
-            device
-                .build_input_stream(
-                    &supported_config.into(),
-                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        if stop_clone.load(Ordering::Relaxed) {
-                            return;
-                        }
-
-                        for chunk in data.chunks(ch) {
-                            let mono: f32 =
-                                chunk.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / ch as f32;
-                            input_samples.push(mono);
-                            level_accum += (mono as f64) * (mono as f64);
-                            level_count += 1;
-                            if level_count >= level_interval {
-                                let rms = (level_accum / level_count as f64).sqrt();
-                                let level = (rms * 300.0).min(100.0) as u32;
-                                AUDIO_LEVEL.store(level, Ordering::Relaxed);
-                                level_accum = 0.0;
-                                level_count = 0;
-                            }
-                        }
-
-                        let mut guard = writer_clone.lock().unwrap();
-                        if let Some(ref mut w) = *guard {
-                            while resample_pos < input_samples.len() as f64 {
-                                let idx = resample_pos as usize;
-                                if idx < input_samples.len() {
-                                    let sample = (input_samples[idx] * 32767.0)
-                                        .clamp(-32768.0, 32767.0)
-                                        as i16;
-                                    if w.write_sample(sample).is_err() {
-                                        return;
-                                    }
-                                    sample_count_clone.fetch_add(1, Ordering::Relaxed);
-                                }
-                                resample_pos += ratio;
-                            }
-                            let consumed = resample_pos as usize;
-                            if consumed > 0 && consumed <= input_samples.len() {
-                                input_samples.drain(..consumed);
-                                resample_pos -= consumed as f64;
-                            }
-                        }
-                    },
-                    move |err| {
-                        tracing::error!("audio stream error: {}", err);
-                        err_flag_clone.store(true, Ordering::Relaxed);
-                    },
-                    None,
-                )
-                .map_err(|e| {
-                    CaptureError::Io(std::io::Error::other(format!("build stream: {}", e)))
-                })?
-        }
-        format => {
-            return Err(CaptureError::Io(std::io::Error::other(format!(
-                "unsupported sample format: {:?}",
-                format
-            ))));
-        }
-    };
-
-    stream
-        .play()
-        .map_err(|e| CaptureError::Io(std::io::Error::other(format!("stream play: {}", e))))?;
+            // Write resampled samples to WAV as i16
+            let mut guard = writer_clone.lock().unwrap();
+            if let Some(ref mut w) = *guard {
+                for &sample in resampled {
+                    let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                    if w.write_sample(s16).is_err() {
+                        return;
+                    }
+                    sample_count_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        },
+    )?;
 
     Ok(stream)
 }
@@ -893,6 +777,77 @@ pub fn list_input_devices() -> Vec<String> {
     }
 
     devices
+}
+
+/// A device with its category for the `minutes sources` command.
+#[derive(Debug, Clone)]
+pub struct CategorizedDevice {
+    pub name: String,
+    pub category: DeviceCategory,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceCategory {
+    Microphone,
+    SystemAudio,
+    Virtual,
+}
+
+/// List audio input devices grouped by category.
+pub fn list_devices_categorized() -> Vec<CategorizedDevice> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_default();
+
+    let mut devices = Vec::new();
+
+    if let Ok(input_devices) = host.input_devices() {
+        for device in input_devices {
+            let Ok(name) = device.name() else { continue };
+            let (sample_rate, channels) = device
+                .default_input_config()
+                .map(|c| (c.sample_rate().0, c.channels()))
+                .unwrap_or((0, 0));
+
+            let category = if is_system_audio_device_name(&name) {
+                DeviceCategory::SystemAudio
+            } else if name.to_lowercase().contains("virtual")
+                || name.to_lowercase().contains("pipewire")
+                || name.to_lowercase().contains("pulse")
+            {
+                DeviceCategory::Virtual
+            } else {
+                DeviceCategory::Microphone
+            };
+
+            devices.push(CategorizedDevice {
+                is_default: name == default_name,
+                name,
+                category,
+                sample_rate,
+                channels,
+            });
+        }
+    }
+
+    devices
+}
+
+/// Auto-detect a loopback/system-audio device for `--call` / `call = "auto"`.
+/// Returns the device name if found, None otherwise.
+pub fn detect_loopback_device() -> Option<String> {
+    let devices = list_devices_categorized();
+    devices
+        .into_iter()
+        .find(|d| d.category == DeviceCategory::SystemAudio)
+        .map(|d| d.name)
 }
 
 #[cfg(test)]

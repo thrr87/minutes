@@ -15,6 +15,8 @@ pub mod markdown;
 pub mod notes;
 pub mod pid;
 pub mod pipeline;
+// Shared mono-downmix + decimation resampler (used by capture and streaming)
+pub(crate) mod resample;
 pub mod screen;
 pub mod search;
 pub mod summarize;
