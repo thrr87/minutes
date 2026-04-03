@@ -5824,7 +5824,7 @@
     }
 
     currentWindow.listen('call:detected', (event) => {
-      const { app_name } = event.payload;
+      const { app_name, is_reminder } = event.payload;
       activeCallSession = {
         app_name,
         dismissed: false,
@@ -5836,9 +5836,11 @@
       setCallHealthChip(callHealthAudio, 'Call audio waiting', false);
       callBanner.classList.add('active');
 
-      // Show the main window so user sees the banner
-      currentWindow.show();
-      currentWindow.setFocus();
+      // Only steal focus on first detection, not periodic reminders
+      if (!is_reminder) {
+        currentWindow.show();
+        currentWindow.setFocus();
+      }
     });
 
     document.getElementById('btn-record-call').addEventListener('click', async () => {

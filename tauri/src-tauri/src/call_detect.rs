@@ -59,6 +59,9 @@ pub struct CallDetector {
 pub struct CallDetectedPayload {
     pub app_name: String,
     pub process_name: String,
+    /// `true` for follow-up reminders about the same ongoing call.
+    /// The frontend should NOT steal focus on reminders.
+    pub is_reminder: bool,
 }
 
 #[derive(Clone)]
@@ -142,11 +145,8 @@ impl CallDetector {
                     match self.note_active_call(&process_name) {
                         DetectionTransition::Noop => {}
                         transition => {
-                            let action = match transition {
-                                DetectionTransition::NewSession => "detected",
-                                DetectionTransition::Reminder => "reminder",
-                                DetectionTransition::Noop => unreachable!(),
-                            };
+                            let is_reminder = matches!(transition, DetectionTransition::Reminder);
+                            let action = if is_reminder { "reminder" } else { "detected" };
                             eprintln!(
                                 "[call-detect] {}: {} ({})",
                                 action, display_name, process_name
@@ -162,17 +162,22 @@ impl CallDetector {
                                 }),
                             );
 
-                            crate::commands::show_user_notification(
-                                &app,
-                                &format!("{} call detected", display_name),
-                                "Open Minutes to start recording",
-                            );
+                            // Only show a macOS notification on first detection,
+                            // not on periodic reminders — those are too noisy.
+                            if !is_reminder {
+                                crate::commands::show_user_notification(
+                                    &app,
+                                    &format!("{} call detected", display_name),
+                                    "Open Minutes to start recording",
+                                );
+                            }
 
                             app.emit(
                                 "call:detected",
                                 CallDetectedPayload {
                                     app_name: display_name,
                                     process_name,
+                                    is_reminder,
                                 },
                             )
                             .ok();
@@ -213,10 +218,18 @@ impl CallDetector {
 
         for config_app in native_apps {
             let config_lower = config_app.to_lowercase();
-            // Substring match: "zoom.us" matches process "zoom.us",
-            // "Microsoft Teams" matches "Microsoft Teams Helper", etc.
+            // Match the actual app binary name, not background daemons.
+            // e.g. "FaceTime" should match the "FaceTime" binary, NOT
+            // "com.apple.FaceTime.FTConversationService" (a system daemon
+            // that runs permanently and caused false positives).
             if running.iter().any(|p| {
-                p.to_lowercase().contains(&config_lower) || config_lower.contains(&p.to_lowercase())
+                let p_lower = p.to_lowercase();
+                // Exact match (most common) or the config name is a
+                // prefix/suffix of the binary name (e.g. "zoom.us" matches
+                // "zoom.us"), but NOT a mere substring of a longer daemon name.
+                p_lower == config_lower
+                    || p_lower.starts_with(&format!("{}.", config_lower))
+                    || p_lower.starts_with(&format!("{} ", config_lower))
             }) {
                 let display = display_name_for(config_app);
                 return Some((display, config_app.clone()));
