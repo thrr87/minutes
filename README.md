@@ -521,10 +521,26 @@ cargo install --path crates/cli --no-default-features
 ### Linux
 
 ```bash
-# Requires: Rust, cmake, ALSA dev headers, libclang (for bindgen)
-sudo apt-get install -y libasound2-dev libclang-dev  # Debian/Ubuntu
+# Debian/Ubuntu — full dep list:
+sudo apt-get install -y \
+  build-essential cmake pkg-config \
+  clang libclang-dev \
+  libasound2-dev libpipewire-0.3-dev libspa-0.2-dev \
+  ffmpeg
+
+cargo install minutes-cli
+# or, from a checkout:
 cargo install --path crates/cli
 ```
+
+**Why each dep is needed:**
+- `build-essential`, `cmake` — whisper.cpp build
+- `clang`, `libclang-dev` — bindgen (used by `whisper-rs` and `pipewire-sys`)
+- `libasound2-dev` — cpal's ALSA backend
+- `libpipewire-0.3-dev`, `libspa-0.2-dev` — cpal's PipeWire backend (compiled unconditionally on Linux)
+- `ffmpeg` — preferred audio decoder for `.m4a`/`.mp3`/`.ogg` (falls back to pure-Rust symphonia if absent)
+
+For Fedora/RHEL: `sudo dnf install -y gcc-c++ cmake pkgconf clang clang-devel alsa-lib-devel pipewire-devel ffmpeg`. For Arch: `sudo pacman -S --needed base-devel cmake clang alsa-lib pipewire ffmpeg`.
 
 ### GPU acceleration (optional)
 
