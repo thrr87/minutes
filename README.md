@@ -561,15 +561,33 @@ cargo install --path crates/cli
 
 Build with GPU support for significantly faster transcription:
 
-```bash
-# NVIDIA GPU (Windows/Linux — requires CUDA toolkit)
-cargo install --path crates/cli --features cuda
+| Backend | Platform | Feature flag | Prerequisites |
+|---------|----------|-------------|---------------|
+| Metal | macOS | `metal` | Xcode Command Line Tools |
+| CoreML | macOS | `coreml` | Xcode Command Line Tools |
+| CUDA | Windows/Linux | `cuda` | [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) |
+| ROCm/HIP | Linux | `hipblas` | [ROCm](https://rocm.docs.amd.com/) 6.1+ (`hipcc`, `hipblas`, `rocblas`) |
+| Vulkan | Windows/Linux | `vulkan` | [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) |
 
+Metal is the only backend that is exercised daily by the maintainer. CUDA, ROCm/HIP,
+and Vulkan should be considered experimental: they wire through to whisper.cpp via
+whisper-rs and are expected to work, but have not been validated in CI.
+
+```bash
 # Apple Metal (macOS)
 cargo install --path crates/cli --features metal
 
 # Apple CoreML (macOS Neural Engine)
 cargo install --path crates/cli --features coreml
+
+# NVIDIA GPU (Windows/Linux)
+cargo install --path crates/cli --features cuda
+
+# AMD GPU via ROCm (Linux — experimental)
+cargo install --path crates/cli --features hipblas
+
+# Vulkan (Windows/Linux — experimental)
+cargo install --path crates/cli --features vulkan
 ```
 
 > **Windows CUDA users:** You may need to set environment variables before building:
@@ -580,6 +598,16 @@ cargo install --path crates/cli --features coreml
 > $env:CMAKE_GENERATOR = "NMake Makefiles"
 > ```
 > The first CUDA build takes longer than usual (compiling GPU kernels) — this is a one-time cost.
+
+> **ROCm/HIP users:** The build expects ROCm installed at `/opt/rocm`. If your
+> installation is elsewhere, set `HIP_PATH` before building:
+> ```bash
+> export HIP_PATH=/path/to/rocm
+> ```
+>
+> **Vulkan users:** On Windows and macOS, set `VULKAN_SDK` to your SDK install
+> root before building. On Linux, `whisper-rs-sys` links against the system
+> `libvulkan`.
 
 ### Setup (all platforms)
 

@@ -108,11 +108,32 @@ Claude: [searches meetings] → synthesizes answer from transcripts
 
 ## GPU acceleration
 
+| Backend | Platform | Feature flag | Prerequisites |
+|---------|----------|-------------|---------------|
+| Metal | macOS | `metal` | Xcode Command Line Tools |
+| CoreML | macOS | `coreml` | Xcode Command Line Tools |
+| CUDA | Windows/Linux | `cuda` | [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) |
+| ROCm/HIP | Linux | `hipblas` | [ROCm](https://rocm.docs.amd.com/) 6.1+ (`hipcc`, `hipblas`, `rocblas`) |
+| Vulkan | Windows/Linux | `vulkan` | [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) |
+
+Metal is the only backend that is exercised daily by the maintainer. CUDA, ROCm/HIP,
+and Vulkan should be considered experimental: they wire through to whisper.cpp via
+whisper-rs and are expected to work, but have not been validated in CI.
+
 ```bash
 cargo install minutes-cli --features metal    # macOS Metal
 cargo install minutes-cli --features coreml   # macOS Neural Engine
 cargo install minutes-cli --features cuda     # NVIDIA CUDA
+cargo install minutes-cli --features hipblas  # AMD ROCm/HIP (experimental)
+cargo install minutes-cli --features vulkan   # Vulkan (experimental)
 ```
+
+> **ROCm/HIP users:** The build expects ROCm installed at `/opt/rocm`. If your
+> installation is elsewhere, set `HIP_PATH` before building.
+>
+> **Vulkan users:** On Windows and macOS, set `VULKAN_SDK` to your SDK install
+> root before building. On Linux, `whisper-rs-sys` links against the system
+> `libvulkan`.
 
 ## Links
 
