@@ -407,8 +407,17 @@ All 26 tools are available in Vibe as `minutes_*` (e.g. `minutes_start_recording
 
 Install the plugin from the marketplace:
 ```bash
+# First-time install
 claude plugin marketplace add silverstein/minutes
 claude plugin install minutes
+# Restart Claude Code to load skills, hooks, and the meeting-analyst agent
+```
+
+**Upgrading?** `claude plugin marketplace add` is a no-op when the marketplace is already on disk — it won't fetch new versions. To pick up new skills and hooks after a release, refresh the marketplace mirror first, then update the plugin:
+```bash
+claude plugin marketplace update minutes    # git pulls the local marketplace mirror
+claude plugin update minutes@minutes        # installs the new version into the cache
+# Restart Claude Code to apply
 ```
 
 18 skills, 1 agent, 2 hooks:
