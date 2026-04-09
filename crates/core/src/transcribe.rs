@@ -269,13 +269,19 @@ fn transcribe_parakeet_dispatch(
 }
 
 /// Build `WhisperContextParameters` with GPU explicitly enabled when a GPU
-/// backend (Metal / CUDA / CoreML) was compiled in. All call sites should use
-/// this instead of `WhisperContextParameters::default()`.
+/// backend was compiled in. All call sites should use this instead of
+/// `WhisperContextParameters::default()`.
 #[cfg(feature = "whisper")]
 pub(crate) fn whisper_context_params() -> whisper_rs::WhisperContextParameters<'static> {
     let mut params = whisper_rs::WhisperContextParameters::default();
 
-    let gpu_compiled = cfg!(any(feature = "metal", feature = "cuda", feature = "coreml"));
+    let gpu_compiled = cfg!(any(
+        feature = "coreml",
+        feature = "cuda",
+        feature = "hipblas",
+        feature = "metal",
+        feature = "vulkan",
+    ));
     params.use_gpu = gpu_compiled;
 
     let backend = if cfg!(feature = "metal") {
@@ -284,6 +290,10 @@ pub(crate) fn whisper_context_params() -> whisper_rs::WhisperContextParameters<'
         "cuda"
     } else if cfg!(feature = "coreml") {
         "coreml"
+    } else if cfg!(feature = "hipblas") {
+        "hipblas"
+    } else if cfg!(feature = "vulkan") {
+        "vulkan"
     } else {
         "cpu"
     };
