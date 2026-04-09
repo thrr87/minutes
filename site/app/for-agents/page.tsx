@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import { CopyButton } from "@/components/copy-button";
+import toolsData from "../docs/mcp/tools/data.json";
 
 export const metadata: Metadata = {
   title: "Minutes for agents — integration reference",
   description:
-    "If you are an LLM helping a user install, configure, or use Minutes, start here. MCP server setup, tool surface, output format, and troubleshooting.",
+    "If you are an LLM helping a user install or query Minutes, start here. MCP server setup, tool surface, output format, and constraints.",
   alternates: { canonical: "/for-agents" },
 };
 
@@ -17,74 +18,70 @@ const mcpConfig = `{
   }
 }`;
 
-const toolGroups = [
-  {
-    label: "Recording",
-    tools: [
-      ["start_recording", "Start capturing audio from the default input device."],
-      ["stop_recording", "Stop the current recording and trigger transcription."],
-      ["get_status", "Check whether a recording or live session is active."],
-      ["list_processing_jobs", "List background transcription jobs for recent recordings."],
+/*
+ * Tool grouping is a presentation concern — the group labels and which tools
+ * go where are defined here, but tool names and descriptions are read from the
+ * generated data.json so they cannot drift from manifest.json.
+ */
+const toolGroupOrder: [string, string[]][] = [
+  [
+    "Recording",
+    ["start_recording", "stop_recording", "get_status", "list_processing_jobs"],
+  ],
+  [
+    "Search and recall",
+    ["list_meetings", "get_meeting", "search_meetings", "research_topic"],
+  ],
+  [
+    "People and relationships",
+    [
+      "get_person_profile",
+      "relationship_map",
+      "track_commitments",
+      "consistency_report",
     ],
-  },
-  {
-    label: "Search and recall",
-    tools: [
-      ["list_meetings", "List recent meetings and voice memos."],
-      ["get_meeting", "Retrieve the full transcript and frontmatter of a specific meeting."],
-      ["search_meetings", "Full-text search across all meeting transcripts."],
-      ["research_topic", "Cross-meeting research: decisions, follow-ups, and mentions of a topic."],
+  ],
+  [
+    "Insights",
+    ["get_meeting_insights", "ingest_meeting", "knowledge_status"],
+  ],
+  [
+    "Live and dictation",
+    [
+      "start_live_transcript",
+      "read_live_transcript",
+      "start_dictation",
+      "stop_dictation",
     ],
-  },
-  {
-    label: "People and relationships",
-    tools: [
-      ["get_person_profile", "Build a profile for a person across all meetings."],
-      ["relationship_map", "Contacts with relationship scores and losing-touch alerts."],
-      ["track_commitments", "Open and stale commitments, optionally filtered by person."],
-      ["consistency_report", "Flag contradicting decisions and stale commitments."],
-    ],
-  },
-  {
-    label: "Insights",
-    tools: [
-      ["get_meeting_insights", "Structured insights (decisions, commitments, questions) with confidence filtering."],
-      ["ingest_meeting", "Extract facts from a meeting into the knowledge base."],
-      ["knowledge_status", "Current state of the knowledge base."],
-    ],
-  },
-  {
-    label: "Live and dictation",
-    tools: [
-      ["start_live_transcript", "Start real-time transcription with per-utterance JSONL output."],
-      ["read_live_transcript", "Read utterances from the active session with cursor or time window."],
-      ["start_dictation", "Speak to clipboard and daily notes."],
-      ["stop_dictation", "Stop dictation mode."],
-    ],
-  },
-  {
-    label: "Notes and processing",
-    tools: [
-      ["add_note", "Add a timestamped note to the current recording or an existing meeting."],
-      ["process_audio", "Process an audio file through the transcription pipeline."],
-      ["open_dashboard", "Open the interactive meeting dashboard in the browser."],
-    ],
-  },
-  {
-    label: "Voice and speaker ID",
-    tools: [
-      ["list_voices", "List enrolled voice profiles for speaker identification."],
-      ["confirm_speaker", "Confirm or correct speaker attribution in a meeting transcript."],
-    ],
-  },
-  {
-    label: "Integration",
-    tools: [
-      ["qmd_collection_status", "Check if the meetings directory is registered as a QMD collection."],
-      ["register_qmd_collection", "Register the meetings directory as a QMD collection."],
-    ],
-  },
-] as const;
+  ],
+  [
+    "Notes and processing",
+    ["add_note", "process_audio", "open_dashboard"],
+  ],
+  [
+    "Voice and speaker ID",
+    ["list_voices", "confirm_speaker"],
+  ],
+  [
+    "Integration",
+    ["qmd_collection_status", "register_qmd_collection"],
+  ],
+];
+
+const toolsByName = new Map(
+  toolsData.tools.map((t) => [t.name, t])
+);
+
+const toolGroups = toolGroupOrder.map(([label, names]) => ({
+  label,
+  tools: names
+    .map((name) => toolsByName.get(name))
+    .filter((t): t is (typeof toolsData.tools)[number] => t != null),
+}));
+
+const toolCount = toolsData.tools.length;
+const resourceCount = toolsData.resources.length;
+const promptCount = toolsData.prompts.length;
 
 const surfaces = [
   {
@@ -183,6 +180,21 @@ const tasks = [
   },
 ] as const;
 
+const troubleshooting = [
+  {
+    problem: "Blank or garbled transcript",
+    fix: "The whisper model may be too small for the audio. Upgrade with: minutes setup --model small (466 MB). If using non-English audio, install ffmpeg (brew install ffmpeg) -- the pure-Rust decoder can loop on accented speech.",
+  },
+  {
+    problem: "Diarization not working (all speech attributed to one speaker)",
+    fix: "Speaker models need a separate download: minutes setup --diarization (~34 MB ONNX models). Without this, diarization is silently skipped.",
+  },
+  {
+    problem: "Recording fails to start or stops immediately",
+    fix: "Check minutes health for mic access and disk space. On macOS, the app needs microphone permission in System Settings > Privacy & Security > Microphone. If a previous recording crashed, a stale PID file at ~/.minutes/recording.pid may need deleting.",
+  },
+] as const;
+
 export default function ForAgentsPage() {
   return (
     <div className="mx-auto max-w-[920px] px-6 pb-16 pt-10 sm:px-8 sm:pt-14">
@@ -243,9 +255,9 @@ export default function ForAgentsPage() {
             Obsidian, or any markdown tool.
           </p>
           <p>
-            The MCP server (26 tools, 7 resources, 6 prompt templates) is the main
-            agent interface. Any MCP-compatible client can search, record, and query
-            through it.
+            The MCP server ({toolCount} tools, {resourceCount} resources,{" "}
+            {promptCount} prompt templates) is the main agent interface. Any
+            MCP-compatible client can search, record, and query through it.
           </p>
         </div>
       </section>
@@ -314,7 +326,7 @@ export default function ForAgentsPage() {
       <section className="mt-14">
         <SectionLabel n="04" label="MCP tool surface" />
         <p className="mb-5 text-[15px] leading-7 text-[var(--text-secondary)]">
-          26 tools grouped by function. Full reference with stable anchor
+          {toolCount} tools grouped by function. Full reference with stable anchor
           links:{" "}
           <a
             href="/docs/mcp/tools"
@@ -338,15 +350,20 @@ export default function ForAgentsPage() {
                 {group.label}
               </p>
               <div className="space-y-1">
-                {group.tools.map(([name, desc]) => (
+                {group.tools.map((tool) => (
                   <div
-                    key={name}
+                    key={tool.name}
                     className="flex gap-3 text-[13px] leading-6"
                   >
-                    <code className="shrink-0 font-mono text-[var(--text)]">
-                      {name}
-                    </code>
-                    <span className="text-[var(--text-secondary)]">{desc}</span>
+                    <a
+                      href={tool.docsUrl}
+                      className="shrink-0 font-mono text-[var(--text)] hover:text-[var(--accent)]"
+                    >
+                      {tool.name}
+                    </a>
+                    <span className="text-[var(--text-secondary)]">
+                      {tool.description}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -413,9 +430,36 @@ export default function ForAgentsPage() {
         </div>
       </section>
 
+      {/* Troubleshooting */}
+      <section className="mt-14">
+        <SectionLabel n="07" label="Troubleshooting" />
+        <p className="mb-4 text-[15px] leading-7 text-[var(--text-secondary)]">
+          These are the three most common issues. Full error catalog:{" "}
+          <a href="/docs/errors" className="text-[var(--accent)] hover:underline">
+            /docs/errors
+          </a>
+          .
+        </p>
+        <div className="space-y-4">
+          {troubleshooting.map((t) => (
+            <div
+              key={t.problem}
+              className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5"
+            >
+              <p className="text-[14px] font-medium text-[var(--text)]">
+                {t.problem}
+              </p>
+              <p className="mt-2 text-[13px] leading-6 text-[var(--text-secondary)]">
+                {t.fix}
+              </p>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {/* Constraints */}
       <section className="mt-14">
-        <SectionLabel n="07" label="Constraints" />
+        <SectionLabel n="08" label="Constraints" />
         <div className="space-y-3 text-[15px] leading-7 text-[var(--text-secondary)]">
           <p>
             Minutes does not join video calls, capture screen shares, or act as a
@@ -443,9 +487,27 @@ export default function ForAgentsPage() {
         </div>
       </section>
 
+      {/* What exists today */}
+      <section className="mt-14">
+        <SectionLabel n="09" label="What exists today" />
+        <div className="space-y-3 text-[15px] leading-7 text-[var(--text-secondary)]">
+          <p>
+            The MCP server, CLI, desktop app, and Claude Code plugin are all
+            shipping. The agent-facing reference surface ({" "}
+            <a href="/llms.txt" className="text-[var(--accent)] hover:underline">llms.txt</a>,{" "}
+            <a href="/docs/mcp/tools" className="text-[var(--accent)] hover:underline">/docs/mcp/tools</a>,{" "}
+            <a href="/docs/errors" className="text-[var(--accent)] hover:underline">/docs/errors</a>
+            ) is generated from source and kept in sync by CI. The wider public docs
+            center (install guides, platform matrix, config reference) is still being
+            built. This page and the generated references are the canonical agent
+            entry points for now.
+          </p>
+        </div>
+      </section>
+
       {/* Reference links */}
       <section className="mt-14">
-        <SectionLabel n="08" label="Reference" />
+        <SectionLabel n="10" label="Reference" />
         <div className="space-y-2">
           {[
             ["/llms.txt", "llms.txt", "Concise agent index with tool names, descriptions, and doc links"],

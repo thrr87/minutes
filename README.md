@@ -396,9 +396,10 @@ Minutes exposes a standard MCP server. Point any MCP-compatible client at it:
 
 Canonical MCP reference now lives at:
 
-- <https://useminutes.app/docs/mcp/tools>
-- <https://useminutes.app/docs/mcp/tools.md>
-- <https://useminutes.app/llms.txt>
+- <https://useminutes.app/for-agents> — agent entry point (setup, tool surface, output format, troubleshooting)
+- <https://useminutes.app/docs/mcp/tools> — generated tool reference with stable anchors
+- <https://useminutes.app/docs/mcp/tools.md> — same reference as raw markdown
+- <https://useminutes.app/llms.txt> — concise agent index
 
 The MCP surface currently includes recording control, meeting search/retrieval, relationship memory, structured insights, live transcript reading, dictation, QMD integration, and an interactive dashboard resource. Tool names, resource URIs, and prompt templates are generated from the live product surface instead of hand-maintained in this README.
 
