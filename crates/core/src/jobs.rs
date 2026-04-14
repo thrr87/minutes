@@ -5,6 +5,7 @@ use crate::markdown::{ContentType, OutputStatus};
 use crate::pid::{self, CaptureMode, PidGuard};
 use crate::pipeline::{self, BackgroundPipelineContext, PipelineStage};
 use chrono::{DateTime, Local};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -399,6 +400,121 @@ fn terminal_state_for_artifact(artifact: &pipeline::TranscriptArtifact) -> JobSt
     }
 }
 
+fn native_captures_dir() -> PathBuf {
+    Config::minutes_dir().join("native-captures")
+}
+
+fn is_native_capture_path(path: &Path) -> bool {
+    path.starts_with(native_captures_dir())
+}
+
+fn native_capture_related_paths(audio_path: &Path) -> Vec<PathBuf> {
+    if !is_native_capture_path(audio_path) {
+        return Vec::new();
+    }
+
+    let Some(dir) = audio_path.parent() else {
+        return Vec::new();
+    };
+    let Some(stem) = audio_path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Vec::new();
+    };
+    let base = stem
+        .strip_suffix(".voice")
+        .or_else(|| stem.strip_suffix(".system"))
+        .unwrap_or(stem);
+
+    vec![
+        dir.join(format!("{}.voice.wav", base)),
+        dir.join(format!("{}.system.wav", base)),
+    ]
+}
+
+fn protected_native_capture_paths() -> HashSet<PathBuf> {
+    let mut protected = HashSet::new();
+    for job in list_jobs_raw() {
+        let audio_path = PathBuf::from(&job.audio_path);
+        if !is_native_capture_path(&audio_path) {
+            continue;
+        }
+        protected.insert(audio_path.clone());
+        protected.extend(native_capture_related_paths(&audio_path));
+    }
+    protected
+}
+
+fn remove_native_capture_stems(audio_path: &Path) {
+    for path in native_capture_related_paths(audio_path) {
+        if path.exists() {
+            fs::remove_file(&path).ok();
+        }
+    }
+}
+
+pub fn cleanup_native_capture_cache(config: &Config) {
+    let dir = native_captures_dir();
+    if !dir.exists() {
+        return;
+    }
+
+    let protected = protected_native_capture_paths();
+    let retention_days = config.recording.native_capture_retention_days;
+    let retention_secs = retention_days.saturating_mul(24 * 60 * 60);
+    let now = std::time::SystemTime::now();
+    let mut removed_files = 0usize;
+    let mut removed_bytes = 0u64;
+
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %error,
+                "failed to read native capture directory for cleanup"
+            );
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if !metadata.is_file() || protected.contains(&path) {
+            continue;
+        }
+
+        if retention_secs > 0 {
+            let age = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .map(|age| age.as_secs())
+                .unwrap_or(0);
+            if age < retention_secs {
+                continue;
+            }
+        }
+
+        if fs::remove_file(&path).is_ok() {
+            removed_files += 1;
+            removed_bytes += metadata.len();
+        }
+    }
+
+    if removed_files > 0 {
+        tracing::info!(
+            dir = %dir.display(),
+            removed_files,
+            removed_bytes,
+            retention_days,
+            "cleaned up stale native call capture artifacts"
+        );
+    }
+}
+
 /// Move the captured WAV alongside the output markdown so users can reprocess later.
 /// e.g. ~/meetings/2026-04-02-standup.md → ~/meetings/2026-04-02-standup.wav
 fn preserve_audio_alongside_output(job: &ProcessingJob) {
@@ -441,6 +557,7 @@ fn preserve_audio_alongside_output(job: &ProcessingJob) {
         j.audio_path = dest_str;
     })
     .ok();
+    remove_native_capture_stems(&audio_src);
     tracing::info!(
         path = %audio_dest.display(),
         "preserved audio alongside transcript"
@@ -596,6 +713,7 @@ where
                 tracing::warn!(error = %error, "graph index rebuild failed after queued job");
             }
             refresh_qmd_collection(config);
+            cleanup_native_capture_cache(config);
             sync_processing_status();
             on_job_update(&review_job);
             continue;
@@ -666,6 +784,7 @@ where
                 if completed_job.state == JobState::Complete {
                     preserve_audio_alongside_output(&completed_job);
                 }
+                cleanup_native_capture_cache(config);
                 // Reload job after preserve may have updated audio_path
                 let final_job = load_job(&completed_job.id).unwrap_or(completed_job);
                 sync_processing_status();
@@ -683,6 +802,7 @@ where
                     sync_processing_status();
                     continue;
                 };
+                cleanup_native_capture_cache(config);
                 sync_processing_status();
                 on_job_update(&failed_job);
             }
@@ -749,6 +869,117 @@ mod tests {
             assert!(job_path(&job.id).exists());
             assert!(PathBuf::from(&job.audio_path).exists());
             assert!(crate::screen::screens_dir_for(Path::new(&job.audio_path)).exists());
+        });
+    }
+
+    #[test]
+    fn preserve_audio_alongside_output_removes_native_call_stems() {
+        with_temp_home(|_| {
+            let native_dir = native_captures_dir();
+            fs::create_dir_all(&native_dir).unwrap();
+            let audio_src = native_dir.join("2026-04-09-141659-call.mov");
+            fs::write(&audio_src, b"mov").unwrap();
+            fs::write(
+                native_dir.join("2026-04-09-141659-call.voice.wav"),
+                b"voice",
+            )
+            .unwrap();
+            fs::write(
+                native_dir.join("2026-04-09-141659-call.system.wav"),
+                b"system",
+            )
+            .unwrap();
+
+            let output_dir = PathBuf::from("/tmp");
+            let output_path = output_dir.join("native-call-success.md");
+            let job = ProcessingJob {
+                id: "job-test".into(),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                title: Some("Call".into()),
+                audio_path: audio_src.display().to_string(),
+                output_path: Some(output_path.display().to_string()),
+                state: JobState::Complete,
+                stage: None,
+                created_at: Local::now(),
+                started_at: None,
+                finished_at: None,
+                recording_started_at: None,
+                recording_finished_at: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                word_count: None,
+                error: None,
+                owner_pid: None,
+            };
+
+            preserve_audio_alongside_output(&job);
+
+            assert!(!audio_src.exists());
+            assert!(!native_dir.join("2026-04-09-141659-call.voice.wav").exists());
+            assert!(!native_dir
+                .join("2026-04-09-141659-call.system.wav")
+                .exists());
+            assert!(output_path.with_extension("wav").exists());
+            fs::remove_file(output_path.with_extension("wav")).ok();
+        });
+    }
+
+    #[test]
+    fn cleanup_native_capture_cache_keeps_needs_review_files() {
+        with_temp_home(|_| {
+            let mut config = Config::default();
+            config.recording.native_capture_retention_days = 0;
+
+            let native_dir = native_captures_dir();
+            fs::create_dir_all(&native_dir).unwrap();
+
+            let keep_mov = native_dir.join("keep-call.mov");
+            let keep_voice = native_dir.join("keep-call.voice.wav");
+            let keep_system = native_dir.join("keep-call.system.wav");
+            fs::write(&keep_mov, b"mov").unwrap();
+            fs::write(&keep_voice, b"voice").unwrap();
+            fs::write(&keep_system, b"system").unwrap();
+
+            let delete_mov = native_dir.join("delete-call.mov");
+            let delete_voice = native_dir.join("delete-call.voice.wav");
+            let delete_system = native_dir.join("delete-call.system.wav");
+            fs::write(&delete_mov, b"mov").unwrap();
+            fs::write(&delete_voice, b"voice").unwrap();
+            fs::write(&delete_system, b"system").unwrap();
+
+            let job = ProcessingJob {
+                id: "job-needs-review".into(),
+                mode: CaptureMode::Meeting,
+                content_type: ContentType::Meeting,
+                title: Some("Needs review".into()),
+                audio_path: keep_mov.display().to_string(),
+                output_path: Some("/tmp/needs-review.md".into()),
+                state: JobState::NeedsReview,
+                stage: JobState::NeedsReview.default_stage(),
+                created_at: Local::now(),
+                started_at: None,
+                finished_at: None,
+                recording_started_at: None,
+                recording_finished_at: None,
+                user_notes: None,
+                pre_context: None,
+                calendar_event: None,
+                word_count: Some(2),
+                error: Some("Transcript requires manual review.".into()),
+                owner_pid: None,
+            };
+            write_job(&job).unwrap();
+
+            cleanup_native_capture_cache(&config);
+
+            assert!(keep_mov.exists());
+            assert!(keep_voice.exists());
+            assert!(keep_system.exists());
+            assert!(!delete_mov.exists());
+            assert!(!delete_voice.exists());
+            assert!(!delete_system.exists());
         });
     }
 

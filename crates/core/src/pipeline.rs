@@ -268,6 +268,225 @@ fn expected_voice_stem_path(audio_path: &Path) -> Option<std::path::PathBuf> {
     Some(dir.join(format!("{}.voice.wav", stem)))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct SourceTranscriptLine {
+    speaker_label: &'static str,
+    timestamp: String,
+    time_secs: f64,
+    text: String,
+}
+
+fn parse_transcript_timestamp(ts: &str) -> Option<f64> {
+    let parts: Vec<&str> = ts.split(':').collect();
+    match parts.len() {
+        2 => {
+            let mins: f64 = parts[0].parse().ok()?;
+            let secs: f64 = parts[1].parse().ok()?;
+            Some(mins * 60.0 + secs)
+        }
+        3 => {
+            let hours: f64 = parts[0].parse().ok()?;
+            let mins: f64 = parts[1].parse().ok()?;
+            let secs: f64 = parts[2].parse().ok()?;
+            Some(hours * 3600.0 + mins * 60.0 + secs)
+        }
+        _ => None,
+    }
+}
+
+fn parse_source_transcript_lines(
+    transcript: &str,
+    speaker_label: &'static str,
+) -> Vec<SourceTranscriptLine> {
+    transcript
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix('[')?;
+            let bracket_end = rest.find(']')?;
+            let timestamp = &rest[..bracket_end];
+            let time_secs = parse_transcript_timestamp(timestamp)?;
+            let text = rest[bracket_end + 1..].trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(SourceTranscriptLine {
+                speaker_label,
+                timestamp: timestamp.to_string(),
+                time_secs,
+                text: text.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn render_source_transcript_lines(lines: &[SourceTranscriptLine]) -> String {
+    lines
+        .iter()
+        .map(|line| format!("[{} {}] {}", line.speaker_label, line.timestamp, line.text))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn merge_source_transcripts(voice_transcript: &str, system_transcript: &str) -> String {
+    let mut lines = parse_source_transcript_lines(voice_transcript, "SPEAKER_0");
+    lines.extend(parse_source_transcript_lines(
+        system_transcript,
+        "SPEAKER_1",
+    ));
+    lines.sort_by(|a, b| {
+        a.time_secs
+            .partial_cmp(&b.time_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.speaker_label.cmp(b.speaker_label))
+            .then_with(|| a.text.cmp(&b.text))
+    });
+
+    if lines.is_empty() {
+        [voice_transcript.trim(), system_transcript.trim()]
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        render_source_transcript_lines(&lines)
+    }
+}
+
+fn count_transcript_words(transcript: &str) -> usize {
+    transcript
+        .lines()
+        .map(|line| {
+            let text = if let Some(rest) = line.strip_prefix('[') {
+                if let Some(bracket_end) = rest.find(']') {
+                    rest[bracket_end + 1..].trim()
+                } else {
+                    line.trim()
+                }
+            } else {
+                line.trim()
+            };
+            text.split_whitespace().count()
+        })
+        .sum()
+}
+
+fn combine_filter_stats(
+    stats: impl IntoIterator<Item = transcribe::FilterStats>,
+    transcript: &str,
+) -> transcribe::FilterStats {
+    let mut combined = transcribe::FilterStats::default();
+    for stat in stats {
+        combined.audio_duration_secs = combined.audio_duration_secs.max(stat.audio_duration_secs);
+        combined.samples_after_silence_strip += stat.samples_after_silence_strip;
+        combined.raw_segments += stat.raw_segments;
+        combined.skipped_no_speech += stat.skipped_no_speech;
+        combined.after_no_speech_filter += stat.after_no_speech_filter;
+        combined.after_dedup += stat.after_dedup;
+        combined.after_interleaved += stat.after_interleaved;
+        combined.after_script_filter += stat.after_script_filter;
+        combined.after_noise_markers += stat.after_noise_markers;
+        combined.after_trailing_trim += stat.after_trailing_trim;
+        combined.rescued_no_speech += stat.rescued_no_speech;
+    }
+    combined.final_words = count_transcript_words(transcript);
+    combined
+}
+
+fn transcribe_for_pipeline(
+    audio_path: &Path,
+    config: &Config,
+) -> Result<transcribe::TranscribeResult, crate::error::TranscribeError> {
+    if infer_capture_backend(audio_path, None) == "native-call" {
+        if let Some(stems) = diarize::discover_stems(audio_path) {
+            let voice_result = transcribe::transcribe(&stems.voice, config);
+            let system_result = transcribe::transcribe(&stems.system, config);
+            match (voice_result, system_result) {
+                (Ok(voice), Ok(system)) => {
+                    let merged = merge_source_transcripts(&voice.text, &system.text);
+                    let merged_word_count = count_transcript_words(&merged);
+                    tracing::info!(
+                        voice_words = count_transcript_words(&voice.text),
+                        system_words = count_transcript_words(&system.text),
+                        merged_words = merged_word_count,
+                        voice = %stems.voice.display(),
+                        system = %stems.system.display(),
+                        "using native-call stem transcription"
+                    );
+                    return Ok(transcribe::TranscribeResult {
+                        text: merged.clone(),
+                        stats: combine_filter_stats([voice.stats, system.stats], &merged),
+                    });
+                }
+                (Ok(voice), Err(error)) => {
+                    let labeled = render_source_transcript_lines(&parse_source_transcript_lines(
+                        &voice.text,
+                        "SPEAKER_0",
+                    ));
+                    tracing::warn!(
+                        error = %error,
+                        voice = %stems.voice.display(),
+                        system = %stems.system.display(),
+                        "system stem transcription failed, using only voice stem"
+                    );
+                    return Ok(transcribe::TranscribeResult {
+                        text: if labeled.is_empty() {
+                            voice.text.clone()
+                        } else {
+                            labeled.clone()
+                        },
+                        stats: combine_filter_stats(
+                            [voice.stats],
+                            if labeled.is_empty() {
+                                &voice.text
+                            } else {
+                                &labeled
+                            },
+                        ),
+                    });
+                }
+                (Err(error), Ok(system)) => {
+                    let labeled = render_source_transcript_lines(&parse_source_transcript_lines(
+                        &system.text,
+                        "SPEAKER_1",
+                    ));
+                    tracing::warn!(
+                        error = %error,
+                        voice = %stems.voice.display(),
+                        system = %stems.system.display(),
+                        "voice stem transcription failed, using only system stem"
+                    );
+                    return Ok(transcribe::TranscribeResult {
+                        text: if labeled.is_empty() {
+                            system.text.clone()
+                        } else {
+                            labeled.clone()
+                        },
+                        stats: combine_filter_stats(
+                            [system.stats],
+                            if labeled.is_empty() {
+                                &system.text
+                            } else {
+                                &labeled
+                            },
+                        ),
+                    });
+                }
+                (Err(voice_error), Err(system_error)) => {
+                    tracing::warn!(
+                        voice_error = %voice_error,
+                        system_error = %system_error,
+                        voice = %stems.voice.display(),
+                        system = %stems.system.display(),
+                        "native-call stem transcription failed, falling back to container audio"
+                    );
+                }
+            }
+        }
+    }
+
+    transcribe::transcribe(audio_path, config)
+}
+
 fn log_attribution_decision(
     audio_path: &Path,
     output_path: &Path,
@@ -709,11 +928,11 @@ pub fn transcribe_to_artifact(
     }
 
     let step_start = std::time::Instant::now();
-    let result = transcribe::transcribe(audio_path, config)?;
+    let result = transcribe_for_pipeline(audio_path, config)?;
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = result.text;
     let filter_stats = result.stats;
-    let word_count = transcript.split_whitespace().count();
+    let word_count = count_transcript_words(&transcript);
     logging::log_step(
         "transcribe",
         &audio_path.display().to_string(),
@@ -1127,12 +1346,12 @@ where
     on_progress(PipelineStage::Transcribing);
     tracing::info!(step = "transcribe", file = %audio_path.display(), "transcribing audio");
     let step_start = std::time::Instant::now();
-    let result = transcribe::transcribe(audio_path, config)?;
+    let result = transcribe_for_pipeline(audio_path, config)?;
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
     let transcript = result.text;
     let filter_stats = result.stats;
 
-    let word_count = transcript.split_whitespace().count();
+    let word_count = count_transcript_words(&transcript);
     tracing::info!(
         step = "transcribe",
         words = word_count,
@@ -2275,6 +2494,29 @@ mod tests {
             infer_capture_backend(Path::new("/Users/test/.minutes/jobs/job-123.wav"), None),
             "cpal"
         );
+    }
+
+    #[test]
+    fn merge_source_transcripts_preserves_both_sources() {
+        let merged = merge_source_transcripts(
+            "[0:00] hello from mic\n[0:02] another local line\n",
+            "[0:00] [Bell]\n[0:01] hello from remote\n",
+        );
+
+        assert_eq!(
+            merged,
+            "[SPEAKER_0 0:00] hello from mic\n[SPEAKER_1 0:00] [Bell]\n[SPEAKER_1 0:01] hello from remote\n[SPEAKER_0 0:02] another local line"
+        );
+    }
+
+    #[test]
+    fn count_transcript_words_ignores_bracket_prefixes() {
+        let transcript = "\
+[SPEAKER_0 0:00] hello from mic\n\
+[SPEAKER_1 0:01] [Bell]\n\
+[0:02] plain unlabeled words\n";
+
+        assert_eq!(count_transcript_words(transcript), 7);
     }
 
     #[test]

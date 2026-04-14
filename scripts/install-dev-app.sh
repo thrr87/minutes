@@ -9,6 +9,8 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 
 DEV_CONFIG="tauri/src-tauri/tauri.dev.conf.json"
 DEV_PRODUCT_NAME="Minutes Dev"
+DEV_BUNDLE_ID="com.useminutes.desktop.dev"
+LOCAL_SIGNING_IDENTITY_DEFAULT="Minutes Dev Local Signing"
 BUILD_APP="target/release/bundle/macos/${DEV_PRODUCT_NAME}.app"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
 INSTALL_APP="${INSTALL_DIR}/${DEV_PRODUCT_NAME}.app"
@@ -28,6 +30,12 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if [[ -z "$SIGNING_IDENTITY" ]]; then
+  if security find-identity -v -p codesigning | grep -Fq "\"$LOCAL_SIGNING_IDENTITY_DEFAULT\""; then
+    SIGNING_IDENTITY="$LOCAL_SIGNING_IDENTITY_DEFAULT"
+  fi
+fi
 
 if [[ -n "$SIGNING_IDENTITY" ]]; then
   if ! security find-identity -v -p codesigning | grep -Fq "$SIGNING_IDENTITY"; then
@@ -74,6 +82,35 @@ mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_APP"
 cp -rf "$BUILD_APP" "$INSTALL_APP"
 
+echo "=== Normalizing helper identities inside installed app ==="
+HELPER_SIGN_ARGS=(--force --sign -)
+if [[ "$SIGN_MODE" == "identity" ]]; then
+  HELPER_SIGN_ARGS=(
+    --force
+    --options runtime
+    --entitlements tauri/src-tauri/entitlements.plist
+    --sign "$SIGNING_IDENTITY"
+  )
+fi
+
+codesign "${HELPER_SIGN_ARGS[@]}" -i "$DEV_BUNDLE_ID" \
+  "$INSTALL_APP/Contents/MacOS/system_audio_record"
+codesign "${HELPER_SIGN_ARGS[@]}" -i "$DEV_BUNDLE_ID" \
+  "$INSTALL_APP/Contents/MacOS/mic_check"
+
+echo "=== Resealing installed ${DEV_PRODUCT_NAME}.app ==="
+if [[ "$SIGN_MODE" == "identity" ]]; then
+  codesign --force --options runtime \
+    --entitlements tauri/src-tauri/entitlements.plist \
+    --sign "$SIGNING_IDENTITY" \
+    "$INSTALL_APP"
+else
+  codesign --force --sign - "$INSTALL_APP"
+fi
+
+echo "=== Resetting Screen Recording permission for ${DEV_PRODUCT_NAME} ==="
+tccutil reset ScreenCapture "$DEV_BUNDLE_ID" >/dev/null 2>&1 || true
+
 echo "=== Running native hotkey diagnostic from installed dev app ==="
 set +e
 ./scripts/diagnose-desktop-hotkey.sh "$INSTALL_APP"
@@ -82,11 +119,13 @@ set -e
 
 echo ""
 echo "Installed app: $INSTALL_APP"
-echo "Bundle id: com.useminutes.desktop.dev"
+echo "Bundle id: $DEV_BUNDLE_ID"
 echo "Signing mode: $SIGN_MODE"
 echo "Hotkey diagnostic exit code: $DIAG_EXIT"
 echo "  0 = CGEventTap started successfully"
 echo "  2 = Input Monitoring / macOS identity is still blocking the hotkey"
+echo "Screen Recording permission has been reset for this dev install."
+echo "Use Record Call once after launch so macOS can attach a fresh grant."
 echo ""
 echo "For TCC-sensitive testing, launch only this installed dev app."
 echo "Avoid the repo symlink (./Minutes.app), raw target bundles, or ad-hoc builds."

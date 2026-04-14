@@ -209,8 +209,16 @@ pub fn update_tray_state_with_mode(app: &tauri::AppHandle, is_active: bool, is_l
 
 // ── Auto-updater ────────────────────────────────────────────
 
+fn updates_enabled_for_identifier(identifier: &str) -> bool {
+    !identifier.ends_with(".dev")
+}
+
 async fn check_for_update(app: &tauri::AppHandle) {
     use tauri_plugin_updater::UpdaterExt;
+
+    if !updates_enabled_for_identifier(app.config().identifier.as_str()) {
+        return;
+    }
 
     let updater = match app.updater() {
         Ok(u) => u,
@@ -658,25 +666,35 @@ fn main() {
             // Clean up stale terminal workspaces from previous sessions
             context::cleanup_stale_workspaces();
 
+            // Prune old raw native call captures that are no longer referenced by jobs.
+            {
+                let cleanup_config = startup_config.clone();
+                std::thread::spawn(move || {
+                    minutes_core::jobs::cleanup_native_capture_cache(&cleanup_config);
+                });
+            }
+
             // Auto-update: check on launch, then every 6 hours.
             // Check-only (no download). Download happens when user clicks "Restart Now".
             // Defers notification if recording/live/dictation is active.
             // Between checks, polls every 30s to surface deferred updates once sessions end.
-            let update_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
-                const DEFERRED_POLL_SECS: u64 = 30;
+            if updates_enabled_for_identifier(app.config().identifier.as_str()) {
+                let update_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    const CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
+                    const DEFERRED_POLL_SECS: u64 = 30;
 
-                loop {
-                    tauri::async_runtime::block_on(check_for_update(&update_handle));
+                    loop {
+                        tauri::async_runtime::block_on(check_for_update(&update_handle));
 
-                    let polls = CHECK_INTERVAL_SECS / DEFERRED_POLL_SECS;
-                    for _ in 0..polls {
-                        std::thread::sleep(std::time::Duration::from_secs(DEFERRED_POLL_SECS));
-                        commands::surface_deferred_update(&update_handle);
+                        let polls = CHECK_INTERVAL_SECS / DEFERRED_POLL_SECS;
+                        for _ in 0..polls {
+                            std::thread::sleep(std::time::Duration::from_secs(DEFERRED_POLL_SECS));
+                            commands::surface_deferred_update(&update_handle);
+                        }
                     }
-                }
-            });
+                });
+            }
 
             // Preload whisper model for dictation in background thread.
             // Only if dictation shortcuts are enabled — avoids 150MB RAM for
@@ -1287,6 +1305,7 @@ fn main() {
             commands::cmd_set_dictation_shortcut,
             commands::cmd_desktop_capabilities,
             commands::cmd_permission_center,
+            commands::cmd_repair_call_capture_permissions,
             commands::cmd_recovery_items,
             commands::cmd_retry_recovery,
             commands::cmd_retry_processing_job,

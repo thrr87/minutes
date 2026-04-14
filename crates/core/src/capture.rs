@@ -889,6 +889,25 @@ pub fn select_input_device(
         ))));
     }
 
+    #[cfg(target_os = "macos")]
+    if let Some(active_input_name) = get_macos_active_input_name() {
+        if let Ok(devices) = host.input_devices() {
+            for device in devices {
+                if let Ok(desc) = device.description() {
+                    let name = desc.name().to_string();
+                    if name == active_input_name {
+                        tracing::info!(device = %name, "matched active macOS input device");
+                        return Ok(device);
+                    }
+                }
+            }
+        }
+        tracing::warn!(
+            active_input = %active_input_name,
+            "could not find active macOS input in cpal devices, falling back"
+        );
+    }
+
     // Try to get the macOS system default input device name
     #[cfg(target_os = "macos")]
     if let Some(system_default_name) = get_macos_default_input_name() {
@@ -916,6 +935,43 @@ pub fn select_input_device(
     // Fallback: cpal's default (works on all platforms)
     host.default_input_device()
         .ok_or(CaptureError::DeviceNotFound)
+}
+
+#[cfg(target_os = "macos")]
+fn find_mic_check_binary() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        let beside_exe = exe.parent().unwrap_or(exe.as_ref()).join("mic_check");
+        if beside_exe.exists() {
+            return Some(beside_exe);
+        }
+    }
+
+    let workspace_helper = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tauri/src-tauri/bin/mic_check");
+    if workspace_helper.exists() {
+        return Some(workspace_helper);
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_macos_active_input_name() -> Option<String> {
+    let helper = find_mic_check_binary()?;
+    let output = std::process::Command::new(helper)
+        .arg("--active-device")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// Query macOS for the actual system default input device name.

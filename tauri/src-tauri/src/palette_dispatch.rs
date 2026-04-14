@@ -334,15 +334,7 @@ fn dispatch_action(
             )
             .map_err(|e| format!("preflight failed: {}", e))?;
             if let Some(reason) = preflight.blocking_reason.as_ref() {
-                let native_call_capture_available = preflight.intent
-                    == minutes_core::capture::RecordingIntent::Call
-                    && matches!(
-                        crate::call_capture::availability(),
-                        crate::call_capture::CallCaptureAvailability::Available { .. }
-                    );
-                if !native_call_capture_available {
-                    return Err(format!("recording blocked: {}", reason));
-                }
+                return Err(format!("recording blocked: {}", reason));
             }
             // Palette launches with pipeline defaults — users who need flags
             // reach for the CLI or the existing tray menu.

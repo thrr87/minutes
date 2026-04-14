@@ -327,6 +327,11 @@ pub struct RecordingConfig {
     /// Allow Minutes to start a call capture even when the selected input
     /// looks like a plain microphone rather than a system-audio route.
     pub allow_degraded_call_capture: bool,
+    /// Days to keep unreferenced raw native call captures in `~/.minutes/native-captures`.
+    /// Completed call recordings preserve their durable output elsewhere, so these
+    /// files are only for retry/debugging. `needs-review` captures stay protected
+    /// by job references. Set to 0 to delete unreferenced leftovers immediately.
+    pub native_capture_retention_days: u64,
     /// Multi-source capture: explicit voice + call device names.
     /// When set, `device` is ignored. CLI `--source` flags override this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -354,6 +359,7 @@ impl Default for RecordingConfig {
             device: None,
             auto_call_intent: false,
             allow_degraded_call_capture: false,
+            native_capture_retention_days: 7,
             sources: None,
         }
     }

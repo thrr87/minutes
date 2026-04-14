@@ -246,6 +246,8 @@ pub struct DesktopCapabilities {
     pub supports_call_detection: bool,
     pub supports_tray_artifact_copy: bool,
     pub supports_dictation_hotkey: bool,
+    pub updates_enabled: bool,
+    pub native_call_capture: call_capture::CallCaptureCapability,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -308,6 +310,10 @@ pub fn current_platform() -> &'static str {
     } else {
         "other"
     }
+}
+
+fn updates_enabled_for_identifier(identifier: &str) -> bool {
+    !identifier.ends_with(".dev")
 }
 
 pub fn supports_calendar_integration() -> bool {
@@ -1348,7 +1354,7 @@ fn call_capture_status() -> ReadinessItem {
             ),
             optional: true,
         },
-        call_capture::CallCaptureAvailability::PermissionRequired { detail } => ReadinessItem {
+        call_capture::CallCaptureAvailability::PermissionRequired { detail, .. } => ReadinessItem {
             label: "Call capture".into(),
             state: "attention".into(),
             detail,
@@ -1367,6 +1373,23 @@ fn call_capture_status() -> ReadinessItem {
             optional: true,
         },
     }
+}
+
+fn blocking_reason_for_start(
+    preflight: &minutes_core::capture::CapturePreflight,
+    native_call_capture_can_start: bool,
+    explicit_call_intent_requested: bool,
+) -> Option<String> {
+    preflight.blocking_reason.as_ref().and_then(|reason| {
+        if explicit_call_intent_requested
+            && preflight.intent == RecordingIntent::Call
+            && native_call_capture_can_start
+        {
+            None
+        } else {
+            Some(reason.clone())
+        }
+    })
 }
 
 fn calendar_status() -> ReadinessItem {
@@ -1748,6 +1771,7 @@ pub fn start_recording(
     if let Some(language) = language_override {
         config.transcription.language = Some(language);
     }
+    let explicit_call_intent_requested = requested_intent == Some(RecordingIntent::Call);
     let preflight = match minutes_core::capture::preflight_recording(
         mode,
         requested_intent,
@@ -1767,15 +1791,42 @@ pub fn start_recording(
             return;
         }
     };
-    let native_call_capture_available = preflight.intent == RecordingIntent::Call
-        && matches!(
-            call_capture::availability(),
-            call_capture::CallCaptureAvailability::Available { .. }
+    #[cfg(target_os = "macos")]
+    let native_call_capture = explicit_call_intent_requested.then(call_capture::availability_fresh);
+    #[cfg(not(target_os = "macos"))]
+    let native_call_capture: Option<call_capture::CallCaptureAvailability> = None;
+
+    let native_call_capture_can_start = native_call_capture
+        .as_ref()
+        .map(|availability| availability.can_attempt_capture())
+        .unwrap_or(false);
+
+    if let Some(reason) = blocking_reason_for_start(
+        &preflight,
+        native_call_capture_can_start,
+        explicit_call_intent_requested,
+    ) {
+        eprintln!("Recording preflight blocked: {}", reason);
+        show_user_notification(&app_handle, "Recording blocked", &reason);
+        starting.store(false, Ordering::Relaxed);
+        recording.store(false, Ordering::Relaxed);
+        reset_hotkey_capture_state(
+            hotkey_runtime.as_ref(),
+            discard_short_hotkey_capture.as_ref(),
         );
-    if let Some(reason) = &preflight.blocking_reason {
-        if !(preflight.intent == RecordingIntent::Call && native_call_capture_available) {
-            eprintln!("Recording preflight blocked: {}", reason);
-            show_user_notification(&app_handle, "Recording blocked", reason);
+        return;
+    }
+    for warning in &preflight.warnings {
+        eprintln!("[minutes] {}", warning);
+    }
+
+    #[cfg(target_os = "macos")]
+    if explicit_call_intent_requested {
+        let availability = native_call_capture.unwrap_or_else(call_capture::availability_fresh);
+        if !availability.can_attempt_capture() {
+            let detail = availability.detail();
+            eprintln!("Native call recording unavailable: {}", detail);
+            show_user_notification(&app_handle, "Call capture unavailable", &detail);
             starting.store(false, Ordering::Relaxed);
             recording.store(false, Ordering::Relaxed);
             reset_hotkey_capture_state(
@@ -1784,13 +1835,7 @@ pub fn start_recording(
             );
             return;
         }
-    }
-    for warning in &preflight.warnings {
-        eprintln!("[minutes] {}", warning);
-    }
 
-    #[cfg(target_os = "macos")]
-    if preflight.intent == RecordingIntent::Call && native_call_capture_available {
         match start_native_call_recording(
             &app_handle,
             &recording,
@@ -1811,21 +1856,15 @@ pub fn start_recording(
                 return;
             }
             Err(error) => {
-                eprintln!("Native call recording unavailable, falling back: {}", error);
-                if let Some(reason) = &preflight.blocking_reason {
-                    show_user_notification(
-                        &app_handle,
-                        "Recording blocked",
-                        &format!("{}\n\nNative call capture failed: {}", reason, error),
-                    );
-                    starting.store(false, Ordering::Relaxed);
-                    recording.store(false, Ordering::Relaxed);
-                    reset_hotkey_capture_state(
-                        hotkey_runtime.as_ref(),
-                        discard_short_hotkey_capture.as_ref(),
-                    );
-                    return;
-                }
+                eprintln!("Native call recording unavailable: {}", error);
+                show_user_notification(&app_handle, "Call capture unavailable", &error);
+                starting.store(false, Ordering::Relaxed);
+                recording.store(false, Ordering::Relaxed);
+                reset_hotkey_capture_state(
+                    hotkey_runtime.as_ref(),
+                    discard_short_hotkey_capture.as_ref(),
+                );
+                return;
             }
         }
     }
@@ -2459,6 +2498,7 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         "processingJobs": processing_jobs,
         "latestOutput": latest_output,
         "callCaptureHealth": call_capture_health,
+        "nativeCallCapture": call_capture::availability().capability(),
         "pid": status.pid,
         "elapsed": elapsed,
         "audioLevel": audio_level,
@@ -2810,7 +2850,33 @@ pub fn cmd_permission_center() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn cmd_desktop_capabilities() -> DesktopCapabilities {
+pub fn cmd_repair_call_capture_permissions(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        return Err("Call capture permission repair is currently available on macOS only.".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        call_capture::repair_permissions(app.config().identifier.as_str())?;
+        Ok(serde_json::json!({
+            "detail": "Minutes reset Screen Recording access for this app identity and opened System Settings. Turn Minutes back on there if macOS removed the toggle, then click Record Call once to attach a fresh grant.",
+            "nativeCallCapture": call_capture::availability_fresh().capability(),
+        }))
+    }
+}
+
+#[tauri::command]
+pub fn cmd_desktop_capabilities(app: tauri::AppHandle) -> DesktopCapabilities {
+    desktop_capabilities_with_updates_enabled(updates_enabled_for_identifier(
+        app.config().identifier.as_str(),
+    ))
+}
+
+fn desktop_capabilities_with_updates_enabled(updates_enabled: bool) -> DesktopCapabilities {
     DesktopCapabilities {
         platform: current_platform().into(),
         folder_reveal_label: folder_reveal_label().into(),
@@ -2818,6 +2884,8 @@ pub fn cmd_desktop_capabilities() -> DesktopCapabilities {
         supports_call_detection: supports_call_detection(),
         supports_tray_artifact_copy: supports_tray_artifact_copy(),
         supports_dictation_hotkey: supports_dictation_hotkey(),
+        updates_enabled,
+        native_call_capture: call_capture::availability().capability(),
     }
 }
 
@@ -3457,6 +3525,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "config_path": path.display().to_string(),
         "recording": {
             "device": config.recording.device,
+            "native_capture_retention_days": config.recording.native_capture_retention_days,
         },
         "transcription": {
             "model": config.transcription.model,
@@ -3528,6 +3597,11 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         // Recording
         ("recording", "device") => {
             config.recording.device = parse_optional_string_setting(&value);
+        }
+        ("recording", "native_capture_retention_days") => {
+            config.recording.native_capture_retention_days = value
+                .parse()
+                .map_err(|_| "native_capture_retention_days must be a number")?;
         }
 
         // Diarization
@@ -3874,7 +3948,7 @@ mod tests {
 
     #[test]
     fn desktop_capabilities_align_with_helper_flags() {
-        let caps = cmd_desktop_capabilities();
+        let caps = desktop_capabilities_with_updates_enabled(false);
 
         assert_eq!(caps.platform, current_platform());
         assert_eq!(caps.folder_reveal_label, folder_reveal_label());
@@ -3888,6 +3962,51 @@ mod tests {
             supports_tray_artifact_copy()
         );
         assert_eq!(caps.supports_dictation_hotkey, supports_dictation_hotkey());
+        assert_eq!(
+            caps.native_call_capture,
+            crate::call_capture::availability().capability()
+        );
+    }
+
+    #[test]
+    fn blocking_reason_is_bypassed_when_native_call_capture_can_start() {
+        let preflight = minutes_core::capture::CapturePreflight {
+            intent: RecordingIntent::Call,
+            inferred_call_app: Some("Teams".into()),
+            input_device: "Built-in Microphone".into(),
+            system_audio_ready: false,
+            allow_degraded: false,
+            blocking_reason: Some("needs a call route".into()),
+            warnings: vec![],
+        };
+
+        assert_eq!(blocking_reason_for_start(&preflight, true, true), None);
+        assert_eq!(
+            blocking_reason_for_start(&preflight, true, false),
+            Some("needs a call route".into())
+        );
+        assert_eq!(
+            blocking_reason_for_start(&preflight, false, true),
+            Some("needs a call route".into())
+        );
+    }
+
+    #[test]
+    fn blocking_reason_still_applies_for_non_call_intents() {
+        let preflight = minutes_core::capture::CapturePreflight {
+            intent: RecordingIntent::Room,
+            inferred_call_app: None,
+            input_device: "Built-in Microphone".into(),
+            system_audio_ready: false,
+            allow_degraded: false,
+            blocking_reason: Some("room blocked".into()),
+            warnings: vec![],
+        };
+
+        assert_eq!(
+            blocking_reason_for_start(&preflight, true, true),
+            Some("room blocked".into())
+        );
     }
 
     #[test]
@@ -5608,6 +5727,10 @@ pub fn cmd_probe_shortcut(keycode: i64) -> serde_json::Value {
 #[tauri::command]
 pub async fn cmd_install_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     use tauri_plugin_updater::UpdaterExt;
+
+    if !updates_enabled_for_identifier(app.config().identifier.as_str()) {
+        return Err("Auto-update is disabled for this local dev build.".into());
+    }
 
     // Block restart if any recording/processing activity is in progress
     let state = app.state::<AppState>();
