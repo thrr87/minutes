@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const NATIVE_CALL_BACKEND: &str = "screencapturekit-helper";
-const SCREEN_RECORDING_SETTINGS_DETAIL: &str = "Minutes needs Screen Recording access to capture call audio. Turn it on in System Settings > Privacy & Security > Screen Recording, then reopen Minutes if macOS asks. If Minutes already looks enabled there, use Fix Permissions to reset the stale grant.";
+const SCREEN_RECORDING_SETTINGS_DETAIL: &str = "Minutes needs Screen & System Audio Recording access to capture call audio. Turn it on in System Settings > Privacy & Security > Screen & System Audio Recording. macOS may not show a permission prompt for this service, so enabling Minutes there manually is the reliable path. If Minutes already looks enabled there, use Fix Permissions to reset the stale grant.";
 const SCREEN_RECORDING_START_FAILURE_SNIPPET: &str =
-    "Screen Recording access is required to capture call audio";
+    "Screen & System Audio Recording access is required to capture call audio";
 #[cfg(target_os = "macos")]
 const SCREEN_RECORDING_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
@@ -54,6 +54,7 @@ pub struct NativeCallCaptureSession {
     child: Child,
     output_path: PathBuf,
     health: Arc<Mutex<CallSourceHealth>>,
+    stderr_lines: Arc<Mutex<Vec<String>>>,
     #[allow(dead_code)] // used once pipeline stem attribution is wired up
     stem_paths: Arc<Mutex<Option<StemPaths>>>,
 }
@@ -186,6 +187,10 @@ impl NativeCallCaptureSession {
             })
     }
 
+    pub fn child_failure_detail(&self, base: &str) -> String {
+        helper_failure_message(base, &self.stderr_lines)
+    }
+
     pub fn stop(&mut self) -> Result<(), String> {
         #[cfg(not(target_os = "macos"))]
         {
@@ -281,7 +286,9 @@ pub fn availability_fresh() -> CallCaptureAvailability {
 }
 
 #[cfg(target_os = "macos")]
-pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
+pub fn start_native_call_capture(
+    preferred_microphone_name: Option<&str>,
+) -> Result<NativeCallCaptureSession, String> {
     if let Some(major) = macos_major_version() {
         if major < 15 {
             return Err(format!(
@@ -289,19 +296,6 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
                 major
             ));
         }
-    }
-
-    match availability_fresh() {
-        CallCaptureAvailability::PermissionRequired {
-            detail,
-            can_start: false,
-        }
-        | CallCaptureAvailability::Unavailable { detail }
-        | CallCaptureAvailability::Unsupported { detail } => {
-            return Err(detail);
-        }
-        CallCaptureAvailability::Available { .. }
-        | CallCaptureAvailability::PermissionRequired { .. } => {}
     }
 
     let helper = find_native_call_helper_binary()
@@ -315,11 +309,16 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
         call_audio_level: 0,
         last_update: chrono::Local::now().to_rfc3339(),
     }));
-    let mut child = Command::new(helper)
+    let mut command = Command::new(helper);
+    command
         .arg(&output_path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(name) = preferred_microphone_name.map(str::trim).filter(|name| !name.is_empty()) {
+        command.arg("--microphone-name").arg(name);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start native call helper: {}", error))?;
 
@@ -461,6 +460,7 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
             child,
             output_path,
             health,
+            stderr_lines,
             stem_paths,
         }),
         Ok(Ok(line)) => {
@@ -488,7 +488,9 @@ pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn start_native_call_capture() -> Result<NativeCallCaptureSession, String> {
+pub fn start_native_call_capture(
+    _preferred_microphone_name: Option<&str>,
+) -> Result<NativeCallCaptureSession, String> {
     Err("native call capture is unsupported on this platform".into())
 }
 
@@ -532,11 +534,12 @@ fn detect_availability() -> CallCaptureAvailability {
 
     match probe_permissions(&helper) {
         Ok(probe) => availability_from_probe(probe),
-        Err(error) => CallCaptureAvailability::Unavailable {
+        Err(error) => CallCaptureAvailability::PermissionRequired {
             detail: format!(
-                "Native call capture helper is present, but permission probing failed: {}",
+                "Minutes could not verify Screen & System Audio Recording access cleanly ({}). Record Call will still try native capture and may prompt again or require re-enabling Minutes in System Settings > Privacy & Security > Screen & System Audio Recording.",
                 error
             ),
+            can_start: true,
         },
     }
 }
@@ -586,18 +589,18 @@ fn availability_from_probe_with_screen_recording_state(
 
     let detail = if screen_recording_settings_required {
         match probe.microphone {
-            MicrophonePermission::Denied => "Minutes needs Screen Recording and Microphone access to capture both sides of a call. Turn them on in System Settings > Privacy & Security, then reopen Minutes if macOS asks.".into(),
-            MicrophonePermission::Restricted => "Minutes needs Screen Recording access to capture call audio, and Microphone access is restricted by macOS on this Mac.".into(),
+            MicrophonePermission::Denied => "Minutes needs Screen & System Audio Recording and Microphone access to capture both sides of a call. Turn them on in System Settings > Privacy & Security, then reopen Minutes if macOS asks.".into(),
+            MicrophonePermission::Restricted => "Minutes needs Screen & System Audio Recording access to capture call audio, and Microphone access is restricted by macOS on this Mac.".into(),
             MicrophonePermission::Authorized | MicrophonePermission::NotDetermined => {
                 SCREEN_RECORDING_SETTINGS_DETAIL.into()
             }
         }
     } else {
         match (probe.screen_recording, probe.microphone) {
-        (false, MicrophonePermission::Authorized) => "Minutes needs Screen Recording access to capture call audio. Start call capture once to let macOS prompt, then reopen Minutes if macOS asks.".into(),
-        (false, MicrophonePermission::NotDetermined) => "Minutes needs Screen Recording and Microphone access to capture both sides of a call. Start call capture once to let macOS show the prompts, then reopen Minutes if Screen Recording asks for it.".into(),
-        (false, MicrophonePermission::Denied) => "Minutes needs Screen Recording and Microphone access to capture both sides of a call. Turn on Microphone in System Settings > Privacy & Security > Microphone, then start call capture again so macOS can request Screen Recording.".into(),
-        (false, MicrophonePermission::Restricted) => "Minutes needs Screen Recording and Microphone access to capture both sides of a call, but Microphone access is restricted by macOS on this Mac.".into(),
+        (false, MicrophonePermission::Authorized) => "Minutes needs Screen & System Audio Recording access to capture call audio. Turn Minutes on in System Settings > Privacy & Security > Screen & System Audio Recording, then try Record Call again.".into(),
+        (false, MicrophonePermission::NotDetermined) => "Minutes needs Screen & System Audio Recording and Microphone access to capture both sides of a call. Turn Minutes on in System Settings > Privacy & Security > Screen & System Audio Recording, then start call capture again so macOS can ask for Microphone access if needed.".into(),
+        (false, MicrophonePermission::Denied) => "Minutes needs Screen & System Audio Recording and Microphone access to capture both sides of a call. Turn on Minutes in System Settings > Privacy & Security > Screen & System Audio Recording and Microphone, then try Record Call again.".into(),
+        (false, MicrophonePermission::Restricted) => "Minutes needs Screen & System Audio Recording and Microphone access to capture both sides of a call, but Microphone access is restricted by macOS on this Mac.".into(),
         (true, MicrophonePermission::NotDetermined) => "Minutes will ask for Microphone access when call capture starts.".into(),
         (true, MicrophonePermission::Denied) => "Minutes needs Microphone access to capture your side of the call. Turn it on in System Settings > Privacy & Security > Microphone.".into(),
         (true, MicrophonePermission::Restricted) => "Minutes needs Microphone access to capture your side of the call, but Microphone access is restricted by macOS on this Mac.".into(),
@@ -651,14 +654,25 @@ fn find_native_call_helper_binary() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 pub fn repair_permissions(bundle_identifier: &str) -> Result<(), String> {
-    let status = Command::new("tccutil")
+    let screen_status = Command::new("tccutil")
         .args(["reset", "ScreenCapture", bundle_identifier])
         .status()
-        .map_err(|error| format!("could not reset Screen Recording access: {}", error))?;
-    if !status.success() {
+        .map_err(|error| format!("could not reset Screen & System Audio Recording access: {}", error))?;
+    if !screen_status.success() {
         return Err(format!(
             "tccutil reset ScreenCapture {} exited with status {}",
-            bundle_identifier, status
+            bundle_identifier, screen_status
+        ));
+    }
+
+    let audio_status = Command::new("tccutil")
+        .args(["reset", "AudioCapture", bundle_identifier])
+        .status()
+        .map_err(|error| format!("could not reset System Audio Recording access: {}", error))?;
+    if !audio_status.success() {
+        return Err(format!(
+            "tccutil reset AudioCapture {} exited with status {}",
+            bundle_identifier, audio_status
         ));
     }
 

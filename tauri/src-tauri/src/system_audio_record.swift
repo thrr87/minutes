@@ -58,22 +58,86 @@ private func preferredActiveInputDeviceName() -> String? {
     return (name?.isEmpty == false) ? name : nil
 }
 
+private func defaultInputDeviceName() -> String? {
+    guard let helperURL = findMicCheckHelperURL() else {
+        return nil
+    }
+
+    let process = Process()
+    process.executableURL = helperURL
+    process.arguments = ["--default-device"]
+    let stdout = Pipe()
+    process.standardOutput = stdout
+    process.standardError = Pipe()
+
+    do {
+        try process.run()
+    } catch {
+        return nil
+    }
+    process.waitUntilExit()
+
+    guard process.terminationStatus == 0 else {
+        return nil
+    }
+
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    let name = String(data: data, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return (name?.isEmpty == false) ? name : nil
+}
+
+private func requestedMicrophoneName() -> String? {
+    guard let flagIndex = CommandLine.arguments.firstIndex(of: "--microphone-name"),
+          flagIndex + 1 < CommandLine.arguments.count else {
+        return nil
+    }
+
+    let name = CommandLine.arguments[flagIndex + 1]
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.isEmpty ? nil : name
+}
+
 private func deviceMatchesPreferredName(_ device: AVCaptureDevice, preferredName: String) -> Bool {
     let lhs = device.localizedName.lowercased()
     let rhs = preferredName.lowercased()
     return lhs == rhs || lhs.contains(rhs) || rhs.contains(lhs)
 }
 
+private func findAudioDevice(preferredName: String) -> AVCaptureDevice? {
+    AVCaptureDevice.devices(for: .audio).first(where: {
+        deviceMatchesPreferredName($0, preferredName: preferredName)
+    })
+}
+
 private func preferredMicrophoneDevice() -> AVCaptureDevice? {
-    if let preferredName = preferredActiveInputDeviceName(),
-       let preferredDevice = AVCaptureDevice.devices(for: .audio).first(where: {
-           deviceMatchesPreferredName($0, preferredName: preferredName)
-       })
+    if let requestedName = requestedMicrophoneName(),
+       let requestedDevice = findAudioDevice(preferredName: requestedName)
     {
+        fputs("using configured microphone for call capture: \(requestedDevice.localizedName)\n", stderr)
+        return requestedDevice
+    }
+
+    if let preferredName = preferredActiveInputDeviceName(),
+       let preferredDevice = findAudioDevice(preferredName: preferredName)
+    {
+        fputs("using active microphone for call capture: \(preferredDevice.localizedName)\n", stderr)
         return preferredDevice
     }
 
-    return AVCaptureDevice.default(for: .audio)
+    if let defaultName = defaultInputDeviceName(),
+       let defaultDevice = findAudioDevice(preferredName: defaultName)
+    {
+        fputs("using system default microphone for call capture: \(defaultDevice.localizedName)\n", stderr)
+        return defaultDevice
+    }
+
+    if let fallback = AVCaptureDevice.default(for: .audio) {
+        fputs("falling back to AVFoundation default microphone for call capture: \(fallback.localizedName)\n", stderr)
+        return fallback
+    }
+
+    return nil
 }
 
 @available(macOS 15.0, *)
@@ -228,7 +292,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
                 code: 2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Screen Recording access is required to capture call audio. Grant it in System Settings > Privacy & Security > Screen Recording, then reopen Minutes if macOS asks."
+                        "Screen & System Audio Recording access is required to capture call audio. Turn Minutes on in System Settings > Privacy & Security > Screen & System Audio Recording, then try Record Call again."
                 ]
             )
         }
@@ -288,7 +352,23 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         voiceStemURL = stemDir.appendingPathComponent("\(baseName).voice.wav")
         systemStemURL = stemDir.appendingPathComponent("\(baseName).system.wav")
 
-        try await stream.startCapture()
+        do {
+            try await stream.startCapture()
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == SCStreamErrorDomain,
+               nsError.code == SCStreamError.failedToStartAudioCapture.rawValue {
+                throw NSError(
+                    domain: "MinutesSystemAudioRecord",
+                    code: nsError.code,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Screen & System Audio Recording access is required to capture call audio. Turn Minutes on in System Settings > Privacy & Security > Screen & System Audio Recording, then try Record Call again."
+                    ]
+                )
+            }
+            throw error
+        }
 
         startMonitoring()
 

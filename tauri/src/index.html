@@ -1962,6 +1962,7 @@
       padding: 8px 12px 12px;
       border-top: 1px solid var(--border);
       position: relative;
+      -webkit-app-region: no-drag;
     }
 
     .footer-actions {
@@ -1972,6 +1973,7 @@
       border-radius: 14px;
       padding: 6px;
       box-shadow: 0 2px 12px var(--shadow-soft), 0 0 0 1px var(--surface-fill);
+      -webkit-app-region: no-drag;
     }
 
     .footer-action-primary {
@@ -1983,6 +1985,7 @@
       display: grid;
       grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
       gap: 4px;
+      -webkit-app-region: no-drag;
     }
 
     .footer-action-primary,
@@ -2217,6 +2220,7 @@
       padding: 12px 16px;
       background: var(--green-tint-soft);
       border-bottom: 1px solid var(--green-border);
+      -webkit-app-region: no-drag;
     }
     .call-detected.active { display: flex; }
     .call-detected-icon { font-size: 16px; flex-shrink: 0; }
@@ -2260,6 +2264,7 @@
       gap: 8px;
       flex-shrink: 0;
       margin-left: 8px;
+      -webkit-app-region: no-drag;
     }
       .ui-hidden {
         display: none;
@@ -2431,7 +2436,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <button class="btn btn-icon" id="btn-settings" title="Settings (⌘,)">⚙</button>
+      <button class="btn btn-icon" id="btn-settings" type="button" title="Settings (⌘,)">⚙</button>
       <button class="header-chip dictation-shortcut" id="dictation-shortcut-chip">Dictate</button>
       <button class="header-chip readiness" id="btn-readiness">Readiness</button>
       <button class="header-chip" id="btn-jobs">Jobs <span id="jobs-count">0</span></button>
@@ -2543,7 +2548,7 @@
       </div>
     </div>
     <div class="call-detected-actions">
-      <button class="btn btn-primary btn-sm" id="btn-record-call">Record</button>
+      <button class="btn btn-primary btn-sm" id="btn-record-call" type="button">Record</button>
       <button class="btn btn-secondary btn-sm" id="btn-repair-call-banner" hidden>Fix Permissions</button>
       <button class="btn btn-secondary btn-sm" id="btn-dismiss-call">Dismiss</button>
     </div>
@@ -2575,7 +2580,7 @@
       <div class="footer-action-primary">
         <div class="footer-primary-actions">
           <button class="btn btn-primary" id="btn-record">Start Recording</button>
-          <button class="btn btn-secondary btn-call" id="btn-record-call-manual">Record Call</button>
+          <button class="btn btn-secondary btn-call" id="btn-record-call-manual" type="button">Record Call</button>
         </div>
         <div class="footer-call-detail" id="call-capture-detail">Capture both your microphone and call audio for Teams or Google Meet while wearing headphones.</div>
         <div class="footer-call-actions">
@@ -2758,7 +2763,7 @@
     <div class="about-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="about-top">
         <h2 id="settings-title" class="settings-title">Settings</h2>
-        <button class="btn btn-secondary btn-sm" id="btn-settings-close">Close</button>
+        <button class="btn btn-secondary btn-sm" id="btn-settings-close" type="button">Close</button>
       </div>
 
       <!-- General -->
@@ -3295,6 +3300,14 @@
     const manualCallButton = document.getElementById('btn-record-call-manual');
     const callCaptureDetail = document.getElementById('call-capture-detail');
     const repairCallCaptureButton = document.getElementById('btn-repair-call-capture');
+    const callBanner = document.getElementById('call-detected-banner');
+    const callTitle = document.getElementById('call-detected-title');
+    const callSubtitle = document.getElementById('call-detected-subtitle');
+    const callDetail = document.getElementById('call-detected-detail');
+    const callHealthMic = document.getElementById('call-health-mic');
+    const callHealthAudio = document.getElementById('call-health-audio');
+    const callRecordBannerButton = document.getElementById('btn-record-call');
+    const callRepairBannerButton = document.getElementById('btn-repair-call-banner');
 
     let isRecording = false;
     let isProcessing = false;
@@ -3313,6 +3326,7 @@
     let jobsHistory = [];
     let notifyOnCompletion = true;
     let playCaptureCues = true;
+    let activeCallSession = null;
     let hotkeyEnabled = false;
     let hotkeyShortcut = 'CmdOrCtrl+Shift+M';
     let dictationShortcutActive = false;
@@ -3330,10 +3344,10 @@
       supportsDictationHotkey: false,
       updatesEnabled: true,
       nativeCallCapture: {
-        status: 'unsupported',
+        status: 'checking',
         backend: null,
-        detail: 'Native call capture is currently implemented on macOS only.',
-        canStart: false,
+        detail: 'Checking native call capture availability…',
+        canStart: true,
       },
     };
     let nativeCallCapture = { ...desktopCapabilities.nativeCallCapture };
@@ -3421,6 +3435,10 @@
       return capability?.status === 'permission-required';
     }
 
+    function callCapturePrimaryLabel(capability = nativeCallCapture) {
+      return 'Record Call';
+    }
+
     function showStatusNotice({ icon = '✓', title = 'Minutes', detail = '', path = '' }) {
       latestOutput = null;
       outputNotice.classList.remove('capture');
@@ -3436,7 +3454,8 @@
 
     function updateCallCaptureUi() {
       if (!manualCallButton || !callCaptureDetail) return;
-      manualCallButton.disabled = !nativeCallCaptureCanStart();
+      manualCallButton.disabled = false;
+      manualCallButton.textContent = callCapturePrimaryLabel();
       manualCallButton.title = nativeCallCapture.detail || '';
       callCaptureDetail.textContent = nativeCallCapture.detail
         || 'Capture both your microphone and call audio for Teams or Google Meet while wearing headphones.';
@@ -4233,17 +4252,35 @@
     });
 
     // ── Recording controls ──
+    async function refreshUiAfterRecordingStart() {
+      startFastPoll();
+      await checkStatus();
+    }
+
     document.getElementById('btn-record').addEventListener('click', async () => {
       try {
         await invoke('cmd_start_recording');
+        await refreshUiAfterRecordingStart();
       } catch (e) {
         console.error('Record:', e);
       }
     });
 
     async function startCallRecording() {
+      const buttons = [manualCallButton, callRecordBannerButton].filter(Boolean);
+      const originals = buttons.map((button) => ({
+        button,
+        text: button.textContent,
+      }));
+
+      for (const { button } of originals) {
+        button.disabled = true;
+        button.textContent = 'Starting...';
+      }
+
       try {
-        await invoke('cmd_start_recording', { intent: 'call' });
+        await invoke('cmd_start_call_recording');
+        await refreshUiAfterRecordingStart();
       } catch (e) {
         console.error('Call recording:', e);
         showStatusNotice({
@@ -4251,6 +4288,11 @@
           title: 'Call recording failed',
           detail: String(e),
         });
+      } finally {
+        updateCallCaptureUi();
+        for (const { button, text } of originals) {
+          button.textContent = text;
+        }
       }
     }
 
@@ -4303,6 +4345,7 @@
     quickThoughtButton.addEventListener('click', async () => {
       try {
         await invoke('cmd_start_recording', { mode: 'quick-thought' });
+        await refreshUiAfterRecordingStart();
       } catch (e) {
         console.error('Quick thought:', e);
       }
@@ -5019,6 +5062,7 @@
       root.querySelector('#btn-start-first-recording').addEventListener('click', async () => {
         try {
           await invoke('cmd_start_recording');
+          await refreshUiAfterRecordingStart();
         } catch (e) {
           console.error('First recording:', e);
         }
@@ -5101,6 +5145,7 @@
           document.getElementById('btn-record-upcoming').onclick = async () => {
             try {
               await invoke('cmd_start_recording');
+              await refreshUiAfterRecordingStart();
             } catch (e) { console.error('Record:', e); }
           };
         } else {
@@ -5118,7 +5163,10 @@
     });
     // Settings overlay
     const settingsOverlay = document.getElementById('settings-overlay');
-    function openSettings() { settingsOverlay.classList.add('active'); loadSettings(); }
+    function openSettings() {
+      settingsOverlay.classList.add('active');
+      return loadSettings();
+    }
     function closeSettings() { settingsOverlay.classList.remove('active'); }
 
     document.getElementById('btn-settings').addEventListener('click', openSettings);
@@ -6548,16 +6596,6 @@
     }
 
     // ── Call detection banner ──
-    const callBanner = document.getElementById('call-detected-banner');
-    const callTitle = document.getElementById('call-detected-title');
-    const callSubtitle = document.getElementById('call-detected-subtitle');
-    const callDetail = document.getElementById('call-detected-detail');
-    const callHealthMic = document.getElementById('call-health-mic');
-    const callHealthAudio = document.getElementById('call-health-audio');
-    const callRecordBannerButton = document.getElementById('btn-record-call');
-    const callRepairBannerButton = document.getElementById('btn-repair-call-banner');
-    let activeCallSession = null;
-
     function setCallHealthChip(node, text, live) {
       if (!node) return;
       node.textContent = text;
@@ -6567,20 +6605,32 @@
     function updateActiveCallBanner() {
       if (!activeCallSession) return;
 
-      const canStart = nativeCallCaptureCanStart();
       const available = nativeCallCapture.status === 'available';
       const permissionRequired = nativeCallCapture.status === 'permission-required';
+      const checking = nativeCallCapture.status === 'checking';
+      const definitelyUnsupported = nativeCallCapture.status === 'unsupported' && desktopCapabilities.platform !== 'macos';
 
       callTitle.textContent = `${activeCallSession.app_name} call detected`;
       callSubtitle.textContent = available
         ? 'Ready to record this call'
         : permissionRequired
-          ? 'Permission needed for call capture'
-          : 'Call capture unavailable';
+          ? 'Permission may be needed for call capture'
+          : checking
+            ? 'Checking call capture availability'
+            : definitelyUnsupported
+              ? 'Call capture unavailable on this platform'
+              : 'Record Call will verify call capture';
       callDetail.textContent = available
         ? 'Minutes will stay ready while this call is active until you start recording or dismiss this session.'
-        : (nativeCallCapture.detail || 'Minutes cannot start native call capture right now.');
-      callRecordBannerButton.disabled = !canStart;
+        : permissionRequired
+          ? (nativeCallCapture.detail || 'Minutes may need macOS permissions before call capture can start.')
+          : checking
+            ? 'Minutes is checking native call capture support for this app.'
+            : definitelyUnsupported
+              ? (nativeCallCapture.detail || 'Native call capture is not available on this platform.')
+              : 'Record Call will try native call capture directly and report any missing permission or helper.';
+      callRecordBannerButton.disabled = false;
+      callRecordBannerButton.textContent = 'Record';
       callRecordBannerButton.title = nativeCallCapture.detail || '';
       if (callRepairBannerButton) {
         callRepairBannerButton.hidden = !permissionRequired;

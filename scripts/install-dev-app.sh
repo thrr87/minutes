@@ -17,15 +17,33 @@ INSTALL_APP="${INSTALL_DIR}/${DEV_PRODUCT_NAME}.app"
 SIGNING_IDENTITY="${MINUTES_DEV_SIGNING_IDENTITY:-${APPLE_SIGNING_IDENTITY:-}}"
 SIGN_MODE="adhoc"
 
+quit_running_dev_app() {
+  osascript -e "tell application \"${DEV_PRODUCT_NAME}\" to quit" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if ! pgrep -f "${INSTALL_APP}/Contents/MacOS/minutes-app" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  pkill -f "${INSTALL_APP}/Contents/MacOS/minutes-app" >/dev/null 2>&1 || true
+}
+
 OPEN_AFTER_INSTALL=1
+RESET_SCREEN_RECORDING_PERMISSION="${MINUTES_DEV_RESET_SCREEN_RECORDING:-1}"
 for arg in "$@"; do
   case "$arg" in
     --no-open)
       OPEN_AFTER_INSTALL=0
       ;;
+    --reset-screen-recording-permission)
+      RESET_SCREEN_RECORDING_PERMISSION=1
+      ;;
+    --keep-screen-recording-permission)
+      RESET_SCREEN_RECORDING_PERMISSION=0
+      ;;
     *)
       echo "Unknown option: $arg" >&2
-      echo "Usage: ./scripts/install-dev-app.sh [--no-open]" >&2
+      echo "Usage: ./scripts/install-dev-app.sh [--no-open] [--reset-screen-recording-permission] [--keep-screen-recording-permission]" >&2
       exit 1
       ;;
   esac
@@ -79,6 +97,7 @@ fi
 
 echo "=== Installing ${DEV_PRODUCT_NAME}.app to ${INSTALL_DIR} ==="
 mkdir -p "$INSTALL_DIR"
+quit_running_dev_app
 rm -rf "$INSTALL_APP"
 cp -rf "$BUILD_APP" "$INSTALL_APP"
 
@@ -108,8 +127,11 @@ else
   codesign --force --sign - "$INSTALL_APP"
 fi
 
-echo "=== Resetting Screen Recording permission for ${DEV_PRODUCT_NAME} ==="
-tccutil reset ScreenCapture "$DEV_BUNDLE_ID" >/dev/null 2>&1 || true
+if [[ "$RESET_SCREEN_RECORDING_PERMISSION" == "1" ]]; then
+  echo "=== Resetting Screen & System Audio Recording permissions for ${DEV_PRODUCT_NAME} ==="
+  tccutil reset ScreenCapture "$DEV_BUNDLE_ID" >/dev/null 2>&1 || true
+  tccutil reset AudioCapture "$DEV_BUNDLE_ID" >/dev/null 2>&1 || true
+fi
 
 echo "=== Running native hotkey diagnostic from installed dev app ==="
 set +e
@@ -124,8 +146,13 @@ echo "Signing mode: $SIGN_MODE"
 echo "Hotkey diagnostic exit code: $DIAG_EXIT"
 echo "  0 = CGEventTap started successfully"
 echo "  2 = Input Monitoring / macOS identity is still blocking the hotkey"
-echo "Screen Recording permission has been reset for this dev install."
-echo "Use Record Call once after launch so macOS can attach a fresh grant."
+if [[ "$RESET_SCREEN_RECORDING_PERMISSION" == "1" ]]; then
+  echo "Screen & System Audio Recording permissions have been reset for this dev install."
+  echo "macOS may not prompt for this service. Re-enable Minutes Dev in System Settings > Privacy & Security > Screen & System Audio Recording before testing."
+else
+  echo "Screen & System Audio Recording permissions were left unchanged for this dev install."
+  echo "Pass --reset-screen-recording-permission to force a clean grant on this install."
+fi
 echo ""
 echo "For TCC-sensitive testing, launch only this installed dev app."
 echo "Avoid the repo symlink (./Minutes.app), raw target bundles, or ad-hoc builds."

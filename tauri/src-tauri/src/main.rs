@@ -1294,6 +1294,7 @@ fn main() {
             commands::cmd_search,
             commands::cmd_add_note,
             commands::cmd_start_recording,
+            commands::cmd_start_call_recording,
             commands::cmd_stop_recording,
             commands::cmd_extend_recording,
             commands::cmd_open_file,

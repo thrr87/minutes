@@ -528,7 +528,9 @@ fn start_native_call_recording(
     requested_title: Option<String>,
 ) -> Result<(), String> {
     minutes_core::pid::create().map_err(|error| error.to_string())?;
-    let mut session = match call_capture::start_native_call_capture() {
+    let mut session = match call_capture::start_native_call_capture(
+        config.recording.device.as_deref(),
+    ) {
         Ok(session) => session,
         Err(error) => {
             minutes_core::pid::remove().ok();
@@ -565,6 +567,10 @@ fn start_native_call_recording(
         }
         if let Some(status) = session.try_wait()? {
             if !status.success() {
+                let detail = session.child_failure_detail(&format!(
+                    "native call helper exited with status {}",
+                    status
+                ));
                 let preserved = preserve_failed_capture_path(&output_path, config);
                 minutes_core::pid::remove().ok();
                 minutes_core::pid::clear_recording_metadata().ok();
@@ -579,15 +585,26 @@ fn start_native_call_recording(
                         kind: "preserved-capture".into(),
                         title: "Native call capture failed".into(),
                         path: saved.display().to_string(),
-                        detail:
-                            "ScreenCaptureKit capture ended early, but the raw output was preserved."
-                                .into(),
+                        detail: format!(
+                            "{}. Raw capture was preserved.",
+                            detail
+                        ),
                     };
                     set_latest_output(latest_output, Some(notice.clone()));
                     maybe_show_completion_notification(
                         app_handle,
                         completion_notifications_enabled,
                         &notice,
+                    );
+                } else {
+                    set_latest_output(
+                        latest_output,
+                        Some(OutputNotice {
+                            kind: "preserved-capture".into(),
+                            title: "Native call capture failed".into(),
+                            path: output_path.display().to_string(),
+                            detail: detail.clone(),
+                        }),
                     );
                 }
                 reset_hotkey_capture_state(hotkey_runtime, discard_short_hotkey_capture);
@@ -1822,20 +1839,6 @@ pub fn start_recording(
 
     #[cfg(target_os = "macos")]
     if explicit_call_intent_requested {
-        let availability = native_call_capture.unwrap_or_else(call_capture::availability_fresh);
-        if !availability.can_attempt_capture() {
-            let detail = availability.detail();
-            eprintln!("Native call recording unavailable: {}", detail);
-            show_user_notification(&app_handle, "Call capture unavailable", &detail);
-            starting.store(false, Ordering::Relaxed);
-            recording.store(false, Ordering::Relaxed);
-            reset_hotkey_capture_state(
-                hotkey_runtime.as_ref(),
-                discard_short_hotkey_capture.as_ref(),
-            );
-            return;
-        }
-
         match start_native_call_recording(
             &app_handle,
             &recording,
@@ -2105,24 +2108,89 @@ pub fn launch_recording(
     Ok(())
 }
 
+fn activation_detail(state: &AppState) -> String {
+    state
+        .latest_output
+        .lock()
+        .ok()
+        .and_then(|notice| notice.clone())
+        .map(|notice| notice.detail)
+        .filter(|detail| !detail.trim().is_empty())
+        .unwrap_or_else(|| {
+            "Minutes desktop app did not confirm that recording became active.".into()
+        })
+}
+
+fn wait_for_recording_activation(state: &AppState, timeout: Duration) -> Result<(), String> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if recording_active(&state.recording) {
+            return Ok(());
+        }
+        if !state.starting.load(Ordering::Relaxed) {
+            return Err(activation_detail(state));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(
+        "Minutes is still waiting for macOS to start recording. Turn Minutes on in System Settings > Privacy & Security > Screen & System Audio Recording, then try Record Call again."
+            .into(),
+    )
+}
+
+fn capture_mode_slug(mode: CaptureMode) -> &'static str {
+    match mode {
+        CaptureMode::Meeting => "meeting",
+        CaptureMode::QuickThought => "quick-thought",
+        CaptureMode::Dictation => "dictation",
+        CaptureMode::LiveTranscript => "live-transcript",
+    }
+}
+
+fn start_recording_command(
+    app: tauri::AppHandle,
+    state: &AppState,
+    mode: CaptureMode,
+    requested_intent: Option<RecordingIntent>,
+    allow_degraded: bool,
+    title: Option<String>,
+    language: Option<String>,
+    source: &'static str,
+) -> Result<(), String> {
+    minutes_core::logging::append_log(&serde_json::json!({
+        "level": "info",
+        "step": "desktop_record_request",
+        "file": "",
+        "extra": {
+            "source": source,
+            "mode": capture_mode_slug(mode),
+            "intent": requested_intent.map(|intent| intent.as_str()),
+            "allow_degraded": allow_degraded,
+        }
+    }))
+    .ok();
+
+    launch_recording(
+        app,
+        state,
+        mode,
+        requested_intent,
+        allow_degraded,
+        title,
+        language,
+        None,
+        None,
+    )?;
+
+    wait_for_recording_activation(state, Duration::from_secs(12))
+}
+
 pub fn handle_desktop_control_request(
     app: tauri::AppHandle,
     state: &AppState,
     request: minutes_core::desktop_control::DesktopControlRequest,
 ) -> minutes_core::desktop_control::DesktopControlResponse {
-    fn activation_detail(state: &AppState) -> String {
-        state
-            .latest_output
-            .lock()
-            .ok()
-            .and_then(|notice| notice.clone())
-            .map(|notice| notice.detail)
-            .filter(|detail| !detail.trim().is_empty())
-            .unwrap_or_else(|| {
-                "Minutes desktop app did not confirm that recording became active.".into()
-            })
-    }
-
     let detail = match request.action {
         minutes_core::desktop_control::DesktopControlAction::StartRecording(payload) => {
             match launch_recording(
@@ -2136,36 +2204,26 @@ pub fn handle_desktop_control_request(
                 None,
                 None,
             ) {
-                Ok(()) => {
-                    let start = Instant::now();
-                    while start.elapsed() < Duration::from_secs(12) {
-                        if recording_active(&state.recording) {
-                            return minutes_core::desktop_control::DesktopControlResponse {
-                                id: request.id,
-                                handled_at: chrono::Local::now(),
-                                accepted: true,
-                                detail:
-                                    "Recording request accepted by the running Minutes desktop app."
-                                        .into(),
-                            };
-                        }
-                        if !state.starting.load(Ordering::Relaxed) {
-                            return minutes_core::desktop_control::DesktopControlResponse {
-                                id: request.id,
-                                handled_at: chrono::Local::now(),
-                                accepted: false,
-                                detail: activation_detail(state),
-                            };
-                        }
-                        std::thread::sleep(Duration::from_millis(100));
+                Ok(()) => match wait_for_recording_activation(state, Duration::from_secs(12)) {
+                    Ok(()) => {
+                        return minutes_core::desktop_control::DesktopControlResponse {
+                            id: request.id,
+                            handled_at: chrono::Local::now(),
+                            accepted: true,
+                            detail:
+                                "Recording request accepted by the running Minutes desktop app."
+                                    .into(),
+                        };
                     }
-                    return minutes_core::desktop_control::DesktopControlResponse {
-                        id: request.id,
-                        handled_at: chrono::Local::now(),
-                        accepted: false,
-                        detail: activation_detail(state),
-                    };
-                }
+                    Err(error) => {
+                        return minutes_core::desktop_control::DesktopControlResponse {
+                            id: request.id,
+                            handled_at: chrono::Local::now(),
+                            accepted: false,
+                            detail: error,
+                        };
+                    }
+                },
                 Err(error) => error,
             }
         }
@@ -2401,7 +2459,7 @@ pub fn cmd_start_recording(
 ) -> Result<(), String> {
     let capture_mode = parse_capture_mode(mode.as_deref())?;
     let requested_intent = parse_recording_intent(intent.as_deref())?;
-    launch_recording(
+    start_recording_command(
         app,
         &state,
         capture_mode,
@@ -2409,8 +2467,24 @@ pub fn cmd_start_recording(
         allow_degraded.unwrap_or(false),
         title,
         language,
+        "tauri-cmd",
+    )
+}
+
+#[tauri::command]
+pub fn cmd_start_call_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    start_recording_command(
+        app,
+        &state,
+        CaptureMode::Meeting,
+        Some(RecordingIntent::Call),
+        false,
         None,
         None,
+        "tauri-call-cmd",
     )
 }
 
@@ -2863,7 +2937,7 @@ pub fn cmd_repair_call_capture_permissions(
     {
         call_capture::repair_permissions(app.config().identifier.as_str())?;
         Ok(serde_json::json!({
-            "detail": "Minutes reset Screen Recording access for this app identity and opened System Settings. Turn Minutes back on there if macOS removed the toggle, then click Record Call once to attach a fresh grant.",
+            "detail": "Minutes reset Screen & System Audio Recording access for this app identity and opened System Settings. Turn Minutes back on there, because macOS may not show a permission prompt for this service, then try Record Call again.",
             "nativeCallCapture": call_capture::availability_fresh().capability(),
         }))
     }

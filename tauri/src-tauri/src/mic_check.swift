@@ -79,6 +79,13 @@ private func deviceName(_ deviceID: AudioObjectID) -> String? {
     return cfName as String
 }
 
+private func defaultInputDeviceName() -> String? {
+    guard let deviceID = defaultInputDeviceID() else {
+        return nil
+    }
+    return deviceName(deviceID)
+}
+
 private func deviceHasInput(_ deviceID: AudioObjectID) -> Bool {
     var property = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyStreamConfiguration,
@@ -148,6 +155,8 @@ struct MicCheckMain {
     static func main() {
         if CommandLine.arguments.contains("--active-device") {
             print(preferredActiveInputDeviceName() ?? "")
+        } else if CommandLine.arguments.contains("--default-device") {
+            print(defaultInputDeviceName() ?? "")
         } else {
             print(activeInputDeviceNames().isEmpty ? "0" : "1")
         }
